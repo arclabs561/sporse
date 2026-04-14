@@ -37,6 +37,7 @@ use std::collections::HashMap;
 /// Dimensions are sorted ascending. Zero-weight entries are removed
 /// on construction. Weights should be non-negative for correct WAND search.
 #[derive(Clone, Debug, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SparseVec {
     pairs: Vec<(u32, f32)>,
 }

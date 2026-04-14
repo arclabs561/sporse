@@ -45,10 +45,7 @@ impl<'a> Cursor<'a> {
 
     #[inline]
     fn current_weight(&self) -> f32 {
-        self.list
-            .entries()
-            .get(self.pos)
-            .map_or(0.0, |e| e.weight)
+        self.list.entries().get(self.pos).map_or(0.0, |e| e.weight)
     }
 
     /// Upper bound contribution: block-max weight * query weight.

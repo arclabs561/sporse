@@ -74,6 +74,27 @@ impl SparseVec {
     pub fn is_empty(&self) -> bool {
         self.pairs.is_empty()
     }
+
+    /// Inner product with another sparse vector.
+    ///
+    /// Uses a merge-join on sorted dimensions: O(nnz(self) + nnz(other)).
+    pub fn dot(&self, other: &SparseVec) -> f32 {
+        let (mut ai, mut bi) = (0, 0);
+        let (a, b) = (&self.pairs, &other.pairs);
+        let mut sum = 0.0f32;
+        while ai < a.len() && bi < b.len() {
+            match a[ai].0.cmp(&b[bi].0) {
+                std::cmp::Ordering::Equal => {
+                    sum += a[ai].1 * b[bi].1;
+                    ai += 1;
+                    bi += 1;
+                }
+                std::cmp::Ordering::Less => ai += 1,
+                std::cmp::Ordering::Greater => bi += 1,
+            }
+        }
+        sum
+    }
 }
 
 impl From<Vec<(u32, f32)>> for SparseVec {
@@ -398,5 +419,96 @@ mod tests {
         assert!((results[3].1 - 2.0).abs() < 1e-5);
         assert_eq!(results[4].0, 2);
         assert!((results[4].1 - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn dot_product() {
+        let a = SparseVec::new(vec![(0, 1.0), (2, 3.0), (5, 2.0)]);
+        let b = SparseVec::new(vec![(1, 4.0), (2, 2.0), (5, 1.0)]);
+        // overlap: dim 2 (3*2=6) + dim 5 (2*1=2) = 8.0
+        assert!((a.dot(&b) - 8.0).abs() < 1e-5);
+
+        let c = SparseVec::new(vec![(99, 1.0)]);
+        assert!((a.dot(&c)).abs() < 1e-5); // disjoint = 0
+    }
+
+    #[test]
+    fn randomized_brute_force_parity() {
+        // Generate random sparse docs, verify WAND matches brute-force for all queries.
+        let mut rng: u64 = 12345;
+        let lcg = |state: &mut u64| -> u64 {
+            *state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *state
+        };
+
+        let n = 200;
+        let nnz = 15;
+        let max_dim = 500u32;
+
+        // Generate docs.
+        let docs: Vec<SparseVec> = (0..n)
+            .map(|_| {
+                let pairs: Vec<(u32, f32)> = (0..nnz)
+                    .map(|_| {
+                        let dim = (lcg(&mut rng) >> 33) as u32 % max_dim;
+                        let weight = ((lcg(&mut rng) >> 33) as f32 / (1u64 << 31) as f32) + 0.01;
+                        (dim, weight)
+                    })
+                    .collect();
+                SparseVec::new(pairs)
+            })
+            .collect();
+
+        let mut index = SporseIndex::new();
+        for (i, doc) in docs.iter().enumerate() {
+            index.insert(i as u32, doc);
+        }
+        index.build();
+
+        // Test with several random queries.
+        for _ in 0..10 {
+            let query_pairs: Vec<(u32, f32)> = (0..8)
+                .map(|_| {
+                    let dim = (lcg(&mut rng) >> 33) as u32 % max_dim;
+                    let weight = ((lcg(&mut rng) >> 33) as f32 / (1u64 << 31) as f32) + 0.01;
+                    (dim, weight)
+                })
+                .collect();
+            let query = SparseVec::new(query_pairs);
+
+            let k = 10;
+            let wand_results = index.search(&query, k);
+
+            // Brute-force: compute all dot products and sort.
+            let mut bf_scores: Vec<(u32, f32)> = docs
+                .iter()
+                .enumerate()
+                .map(|(i, doc)| (i as u32, query.dot(doc)))
+                .filter(|&(_, s)| s > 0.0)
+                .collect();
+            bf_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
+            bf_scores.truncate(k);
+
+            // WAND must return the same top-k as brute force.
+            assert_eq!(
+                wand_results.len(),
+                bf_scores.len(),
+                "result count mismatch: wand={} bf={}",
+                wand_results.len(),
+                bf_scores.len()
+            );
+            for (wand, bf) in wand_results.iter().zip(bf_scores.iter()) {
+                assert_eq!(wand.0, bf.0, "doc_id mismatch: wand={} bf={}", wand.0, bf.0);
+                assert!(
+                    (wand.1 - bf.1).abs() < 1e-4,
+                    "score mismatch for doc {}: wand={} bf={}",
+                    wand.0,
+                    wand.1,
+                    bf.1
+                );
+            }
+        }
     }
 }

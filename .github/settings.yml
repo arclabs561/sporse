@@ -1,0 +1,14 @@
+repository:
+  name: sporse
+  description: Sparse vector index for learned sparse retrieval
+  homepage: https://docs.rs/sporse
+  default_branch: main
+  has_wiki: false
+  has_projects: false
+  topics:
+    - sparse
+    - retrieval
+    - search
+    - splade
+    - inverted-index
+    - wand

@@ -1,6 +1,7 @@
 pub(crate) const BLOCK_SIZE: usize = 128;
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct PostingEntry {
     pub doc_id: u32,
     pub weight: f32,
@@ -8,6 +9,7 @@ pub(crate) struct PostingEntry {
 
 /// A posting list for a single dimension, with block-max metadata for WAND pruning.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct PostingList {
     entries: Vec<PostingEntry>,
     block_maxes: Vec<f32>,

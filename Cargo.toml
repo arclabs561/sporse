@@ -14,4 +14,9 @@ categories = ["algorithms", "data-structures"]
 
 [workspace]
 
+[features]
+default = []
+serde = ["dep:serde"]
+
 [dependencies]
+serde = { version = "1", features = ["derive"], optional = true }

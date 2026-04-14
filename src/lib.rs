@@ -110,6 +110,10 @@ impl From<Vec<(u32, f32)>> for SparseVec {
 /// Insert documents with [`insert`](SporseIndex::insert), call
 /// [`build`](SporseIndex::build) to finalize, then
 /// [`search`](SporseIndex::search) for top-k results by inner product.
+///
+/// With the `serde` feature, the entire index can be serialized after
+/// [`build`](SporseIndex::build) and deserialized without rebuilding.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SporseIndex {
     postings: HashMap<u32, posting::PostingList>,
     num_docs: u32,

@@ -515,4 +515,38 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn serde_index_round_trip() {
+        let mut index = SporseIndex::new();
+        index.insert(0, &SparseVec::new(vec![(0, 1.0), (3, 2.5)]));
+        index.insert(1, &SparseVec::new(vec![(1, 3.0), (3, 1.0)]));
+        index.insert(2, &SparseVec::new(vec![(0, 0.5), (3, 0.8)]));
+        index.build();
+
+        let query = SparseVec::new(vec![(0, 1.0), (3, 1.0)]);
+        let original_results = index.search(&query, 3);
+
+        // Serialize -> deserialize.
+        let json = serde_json::to_string(&index).unwrap();
+        let loaded: SporseIndex = serde_json::from_str(&json).unwrap();
+
+        // Search results must be identical.
+        let loaded_results = loaded.search(&query, 3);
+        assert_eq!(original_results.len(), loaded_results.len());
+        for (a, b) in original_results.iter().zip(loaded_results.iter()) {
+            assert_eq!(a.0, b.0);
+            assert!((a.1 - b.1).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn serde_sparse_vec_round_trip() {
+        let sv = SparseVec::new(vec![(10, 2.5), (0, 1.0), (5, 0.3)]);
+        let json = serde_json::to_string(&sv).unwrap();
+        let loaded: SparseVec = serde_json::from_str(&json).unwrap();
+        assert_eq!(sv.pairs(), loaded.pairs());
+    }
 }

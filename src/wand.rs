@@ -27,6 +27,8 @@ pub(crate) struct Cursor<'a> {
     list: &'a PostingList,
     pos: usize,
     pub query_weight: f32,
+    /// query_weight * list.max_weight — cached for pivot selection.
+    pub max_score: f32,
 }
 
 impl<'a> Cursor<'a> {
@@ -35,6 +37,7 @@ impl<'a> Cursor<'a> {
             list,
             pos: 0,
             query_weight,
+            max_score: list.max_weight * query_weight,
         }
     }
 
@@ -75,26 +78,73 @@ impl<'a> Cursor<'a> {
     }
 }
 
+// ── WAND search statistics (diagnostic, not in hot path) ────────────────────
+
+/// Per-query statistics from a WAND search run.
+#[derive(Debug, Default)]
+pub struct WandStats {
+    /// Number of WAND loop iterations (each iteration = one pivot evaluation).
+    pub iterations: u64,
+    /// Documents fully scored (pivot + all cursors at pivot_doc).
+    pub docs_scored: u64,
+    /// Pivot advances: times a cursor was skipped without scoring.
+    pub cursor_skips: u64,
+}
+
 // ── Block-Max WAND ───────────────────────────────────────────────────────────
 
 /// Block-Max WAND search. Returns `(doc_id, score)` in descending score order.
 ///
 /// Assumes non-negative weights. Negative weights may cause missed results.
 pub(crate) fn search_bmw(cursors: &mut Vec<Cursor>, k: usize) -> Vec<(u32, f32)> {
+    search_bmw_impl(cursors, k, false).0
+}
+
+/// Block-Max WAND search with per-query statistics. Used for profiling/diagnosis.
+pub(crate) fn search_bmw_with_stats(
+    cursors: &mut Vec<Cursor>,
+    k: usize,
+) -> (Vec<(u32, f32)>, WandStats) {
+    search_bmw_impl(cursors, k, true)
+}
+
+fn search_bmw_impl(
+    cursors: &mut Vec<Cursor>,
+    k: usize,
+    collect_stats: bool,
+) -> (Vec<(u32, f32)>, WandStats) {
     let mut heap: BinaryHeap<Reverse<(OrdF32, u32)>> = BinaryHeap::with_capacity(k + 1);
     let mut threshold = 0.0f32;
+    let mut stats = WandStats::default();
+
+    // Pre-sort cursors by max_score descending so the pivot accumulation loop
+    // terminates as early as possible (high-impact terms reach threshold sooner).
+    cursors.sort_unstable_by(|a, b| b.max_score.total_cmp(&a.max_score));
 
     loop {
-        cursors.retain(|c| !c.is_exhausted());
+        // Remove exhausted cursors in O(n) with swap-remove.
+        {
+            let mut i = 0;
+            while i < cursors.len() {
+                if cursors[i].is_exhausted() {
+                    cursors.swap_remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
         if cursors.is_empty() {
             break;
         }
 
-        // Sort cursors by current doc_id (ascending).
+        if collect_stats {
+            stats.iterations += 1;
+        }
+
+        // Sort by current doc_id ascending for WAND pivot selection.
         cursors.sort_unstable_by_key(|c| c.current_doc().unwrap_or(u32::MAX));
 
-        // Find pivot: accumulate upper bounds left-to-right until we can
-        // potentially beat the threshold (or the heap has room).
+        // Find pivot: accumulate upper bounds left-to-right until we exceed threshold.
         let mut acc = 0.0f32;
         let mut pivot_idx = None;
         for (i, cursor) in cursors.iter().enumerate() {
@@ -107,7 +157,7 @@ pub(crate) fn search_bmw(cursors: &mut Vec<Cursor>, k: usize) -> Vec<(u32, f32)>
 
         let pivot_idx = match pivot_idx {
             Some(p) => p,
-            None => break, // no remaining docs can beat threshold
+            None => break,
         };
 
         let pivot_doc = match cursors[pivot_idx].current_doc() {
@@ -115,18 +165,24 @@ pub(crate) fn search_bmw(cursors: &mut Vec<Cursor>, k: usize) -> Vec<(u32, f32)>
             None => break,
         };
 
-        // Check if all cursors up to the pivot point to pivot_doc.
+        // Check if all cursors up to and including the pivot are at pivot_doc.
         let all_at_pivot = cursors[..=pivot_idx]
             .iter()
             .all(|c| c.current_doc() == Some(pivot_doc));
 
         if all_at_pivot {
-            // Fully score pivot_doc across ALL cursors (not just up to pivot).
+            // Score pivot_doc across ALL cursors, advancing those at pivot_doc
+            // in a single pass (avoids a second scan).
             let mut score = 0.0f32;
-            for cursor in cursors.iter() {
+            for cursor in cursors.iter_mut() {
                 if cursor.current_doc() == Some(pivot_doc) {
                     score += cursor.current_weight() * cursor.query_weight;
+                    cursor.advance();
                 }
+            }
+
+            if collect_stats {
+                stats.docs_scored += 1;
             }
 
             if heap.len() < k || score > threshold {
@@ -138,21 +194,17 @@ pub(crate) fn search_bmw(cursors: &mut Vec<Cursor>, k: usize) -> Vec<(u32, f32)>
                     threshold = heap.peek().map_or(0.0, |r| r.0 .0 .0);
                 }
             }
-
-            // Advance all cursors pointing to pivot_doc.
-            for cursor in cursors.iter_mut() {
-                if cursor.current_doc() == Some(pivot_doc) {
-                    cursor.advance();
-                }
-            }
         } else {
-            // Advance the leftmost cursor that's behind pivot_doc.
-            // Cursors are sorted by doc_id, so cursor[0] is the smallest.
-            if let Some(cursor) = cursors[..pivot_idx]
-                .iter_mut()
-                .find(|c| c.current_doc().is_some_and(|d| d < pivot_doc))
-            {
-                cursor.advance_to(pivot_doc);
+            // Advance the leftmost cursor behind pivot_doc.
+            // Cursors are sorted ascending so cursor[0] is earliest.
+            for cursor in cursors[..pivot_idx].iter_mut() {
+                if cursor.current_doc().is_some_and(|d| d < pivot_doc) {
+                    cursor.advance_to(pivot_doc);
+                    if collect_stats {
+                        stats.cursor_skips += 1;
+                    }
+                    break;
+                }
             }
         }
     }
@@ -162,5 +214,5 @@ pub(crate) fn search_bmw(cursors: &mut Vec<Cursor>, k: usize) -> Vec<(u32, f32)>
         .map(|Reverse((OrdF32(score), doc_id))| (doc_id, score))
         .collect();
     results.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
-    results
+    (results, stats)
 }

@@ -183,6 +183,32 @@ impl SporseIndex {
         wand::search_bmw(&mut cursors, k)
     }
 
+    /// Search with per-query WAND statistics. For profiling and diagnostics.
+    ///
+    /// Returns `(results, stats)` where results are `(doc_id, score)` pairs
+    /// in descending score order, and stats describe the WAND traversal.
+    #[doc(hidden)]
+    pub fn search_with_stats(
+        &self,
+        query: &SparseVec,
+        k: usize,
+    ) -> (Vec<(u32, f32)>, wand::WandStats) {
+        assert!(self.built, "must call build() before search()");
+        if k == 0 || query.is_empty() {
+            return (Vec::new(), wand::WandStats::default());
+        }
+        let mut cursors: Vec<wand::Cursor> = Vec::new();
+        for &(dim, query_weight) in query.pairs() {
+            if let Some(list) = self.postings.get(&dim) {
+                cursors.push(wand::Cursor::new(list, query_weight));
+            }
+        }
+        if cursors.is_empty() {
+            return (Vec::new(), wand::WandStats::default());
+        }
+        wand::search_bmw_with_stats(&mut cursors, k)
+    }
+
     /// Number of documents inserted.
     pub fn len(&self) -> u32 {
         self.num_docs

@@ -17,8 +17,10 @@ categories = ["algorithms", "data-structures"]
 [features]
 default = []
 serde = ["dep:serde"]
+innr = ["dep:innr"]
 
 [dependencies]
+innr = { version = "0.2.4", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]

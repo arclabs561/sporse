@@ -8,6 +8,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 - Expanded examples for impact-score walkthroughs, WAND diagnostics, and serde
   round-trips.
+- Restored the public `innr` feature as a compatibility no-op after the
+  optional dependency was removed.
 
 ## [0.3.0] - 2026-04-20
 

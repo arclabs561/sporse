@@ -17,6 +17,9 @@ categories = ["algorithms", "data-structures"]
 [features]
 default = []
 serde = ["dep:serde"]
+# Compatibility feature retained for crates that enabled the former optional
+# `innr` integration. The integration no longer needs an extra dependency.
+innr = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"], optional = true }
@@ -28,3 +31,7 @@ serde_json = "1"
 [[bench]]
 name = "search"
 harness = false
+
+[[example]]
+name = "serde_roundtrip"
+required-features = ["serde"]

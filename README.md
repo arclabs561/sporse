@@ -23,6 +23,16 @@ let results = index.search(&query, 2);
 // [(0, 3.5), (1, 1.0)] -- doc 0 scores highest
 ```
 
+## Examples
+
+Runnable examples live in [`examples/`](examples/):
+
+- `basic.rs` prints score contributions for a small impact-score collection.
+- `wand_diagnostics.rs` checks exact top-k parity against brute force and reports
+  how many documents Block-Max WAND scored.
+- `serde_roundtrip.rs` verifies built-index serialization with the `serde`
+  feature.
+
 ## Features
 
 - `serde` -- Serialize/Deserialize for `SparseVec`

@@ -2,8 +2,11 @@
 
 Sparse vector index for learned sparse retrieval.
 
-Indexes sparse vectors (SPLADE, LADE) using an inverted index with
-Block-Max WAND traversal for exact top-k inner product search.
+Indexes sparse vectors (SPLADE, LADE) using an inverted index. Top-k inner
+product search uses Block-Max WAND, a safe dynamic-pruning traversal: it skips
+documents that provably cannot enter the top-k, so the result is identical to an
+exhaustive scan over the same scores (the `wand_diagnostics` example verifies
+this parity).
 
 ## Usage
 
@@ -36,3 +39,13 @@ Runnable examples live in [`examples/`](examples/):
 ## Features
 
 - `serde` -- Serialize/Deserialize for `SparseVec`
+
+## References
+
+- Broder, Carmel, Herscovici, Soffer, and Zien, "Efficient Query Evaluation
+  using a Two-Level Retrieval Process" (CIKM 2003). The original WAND traversal.
+- Ding and Suel, "Faster Top-k Document Retrieval Using Block-Max Indexes"
+  (SIGIR 2011). The block-max refinement this crate implements.
+- Formal, Piwowarski, and Clinchant, "SPLADE: Sparse Lexical and Expansion Model
+  for First Stage Ranking" (arXiv:2107.05720). The learned sparse
+  representations this index is built to serve.

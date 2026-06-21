@@ -6,13 +6,16 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ### Added
 
-- `sae` module: composite-code representation (CCSA; Lassance, Formal, and
-  Clinchant 2022, arXiv:2204.07023) and its index integration.
-  `CompositeCode::from_logits` turns per-chunk encoder logits into a C-hot code
-  (argmax per chunk over `C` chunks of size `L`), and `to_sparse_vec` adapts it
-  into the `SparseVec` the index already serves. This is the serving half;
-  training the encoder (Gumbel-Softmax straight-through + reconstruction/uniformity
-  loss, autodiff-backed) is a planned follow-on.
+- `sae` module: Composite Code Sparse Autoencoder (CCSA; Lassance, Formal, and
+  Clinchant 2022, arXiv:2204.07023), end to end. `CompositeCode::from_logits`
+  turns per-chunk encoder logits into a C-hot code (argmax over `C` chunks of
+  size `L`) and `to_sparse_vec` feeds the existing index. `train_ccsa` trains the
+  shallow linear encoder/decoder with hand-derived straight-through gradients and
+  gradient descent (dependency-free f32; no autodiff framework), returning a
+  `CcsaModel` whose `encode` produces codes for the index. v1 core: documented
+  simplifications versus the paper are no input BatchNorm, no Gumbel sampling
+  noise (deterministic argmax), and no uniformity regularizer. A
+  `train_reduces_mse` test guards the gradient derivation.
 - Expanded examples for impact-score walkthroughs, WAND diagnostics, and serde
   round-trips.
 - Restored the public `innr` feature as a compatibility no-op after the

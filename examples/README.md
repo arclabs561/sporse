@@ -22,6 +22,18 @@ cargo run --release --example basic
 The output lists ranked documents and the matched sparse dimensions that
 contribute to each score.
 
+Expected excerpt:
+
+```text
+index: 6 documents, 13 sparse dimensions
+query: sparse retrieval with WAND impact scoring
+
+1. SPLADE retrieval with inverted indexes  score=11.220
+   retrieval        4.620
+   sparse           4.560
+   wand             2.040
+```
+
 ## WAND Diagnostics
 
 `wand_diagnostics.rs` builds a larger synthetic index, checks exact top-k
@@ -35,6 +47,17 @@ cargo run --release --example wand_diagnostics
 
 The output reports exact top-k parity against brute force, average WAND loop
 iterations, fully-scored document count, and cursor skips.
+
+Expected output:
+
+```text
+index: 4000 docs, 24000 sparse dimensions, 96 nnz/doc
+queries: 12, 40 nnz/query, top-10
+exact top-k parity with brute force: 12/12
+average WAND iterations: 576.8
+average fully-scored docs: 244.4 (6.11% of collection)
+average cursor skips: 331.5
+```
 
 ## Serialization
 

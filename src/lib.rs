@@ -28,6 +28,9 @@
 mod posting;
 mod wand;
 
+/// Composite-code sparse-autoencoder codes (CCSA) and their index integration.
+pub mod sae;
+
 use std::collections::HashMap;
 
 // ── SparseVec ────────────────────────────────────────────────────────────────

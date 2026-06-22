@@ -134,6 +134,10 @@ pub struct CcsaTrainConfig {
     pub lr: f32,
     /// Straight-through softmax temperature (the paper's tau).
     pub temperature: f32,
+    /// Weight (lambda) on the uniformity / load-balance regularizer, which pushes
+    /// per-dimension usage toward uniform and prevents code collapse. `0.0`
+    /// disables it (reconstruction only).
+    pub uniformity_weight: f32,
     /// Seed for deterministic weight initialization.
     pub seed: u64,
 }
@@ -147,11 +151,12 @@ pub struct CcsaTrainConfig {
 /// This is the v1 core of CCSA (arXiv:2204.07023): a shallow linear
 /// encoder/decoder, a hard composite code (argmax per chunk) on the forward
 /// pass, a straight-through softmax on the backward pass, and an MSE
-/// reconstruction objective trained by gradient descent. Documented
-/// simplifications versus the paper: no input BatchNorm (normalize externally),
-/// no Gumbel sampling noise (deterministic argmax), and no uniformity
-/// regularizer. The gradients are hand-derived; the `train_reduces_mse` test
-/// guards their correctness.
+/// reconstruction objective trained by gradient descent, with an optional
+/// uniformity / load-balance regularizer (`uniformity_weight`) that prevents
+/// code collapse. Documented simplifications versus the paper: no input
+/// BatchNorm (normalize externally) and no Gumbel sampling noise (deterministic
+/// argmax). The gradients are hand-derived; the `train_reduces_mse` and
+/// `uniformity_balances_usage` tests guard their correctness.
 #[derive(Debug, Clone)]
 pub struct CcsaModel {
     config: CompositeCodeConfig,
@@ -228,7 +233,24 @@ pub fn train_ccsa(data: &[Vec<f32>], cfg: &CcsaTrainConfig) -> CcsaModel {
     let mut w_dec: Vec<f32> = (0..d_total * m).map(|_| rng.next_small()).collect();
 
     let n = data.len().max(1) as f32;
+    let target_p = c as f32 / d_total as f32;
     for _ in 0..cfg.epochs {
+        // Pass 1: per-dimension usage over the batch (for the uniformity term).
+        let mut usage = vec![0.0f32; d_total];
+        if cfg.uniformity_weight > 0.0 {
+            for x in data {
+                for cc in 0..c {
+                    let z: Vec<f32> = (0..l)
+                        .map(|j| {
+                            let d = cc * l + j;
+                            dot(&w_enc[d * m..d * m + m], x)
+                        })
+                        .collect();
+                    usage[cc * l + argmax(&z)] += 1.0;
+                }
+            }
+        }
+
         let mut g_enc = vec![0.0f32; d_total * m];
         let mut g_dec = vec![0.0f32; d_total * m];
 
@@ -272,9 +294,18 @@ pub fn train_ccsa(data: &[Vec<f32>], cfg: &CcsaTrainConfig) -> CcsaModel {
             }
 
             // d_code over all dimensions, then straight-through softmax to logits.
-            let d_code: Vec<f32> = (0..d_total)
+            let mut d_code: Vec<f32> = (0..d_total)
                 .map(|d| dot(&w_dec[d * m..d * m + m], &d_xhat))
                 .collect();
+            // Uniformity gradient: push over-used dimensions down. The squared
+            // deviation of usage from the uniform target C/D gives
+            // dL_UR/dcode[j] = lambda * (2 / (D * B)) * (usage[j]/B - C/D).
+            if cfg.uniformity_weight > 0.0 {
+                let coef = cfg.uniformity_weight * 2.0 / (d_total as f32 * n);
+                for j in 0..d_total {
+                    d_code[j] += coef * (usage[j] / n - target_p);
+                }
+            }
             let mut d_logits = vec![0.0f32; d_total];
             for cc in 0..c {
                 let g = &d_code[cc * l..cc * l + l];
@@ -382,6 +413,7 @@ mod tests {
             epochs: 0,
             lr: 0.5,
             temperature: 1.0,
+            uniformity_weight: 0.0,
             seed: 42,
         };
         let initial = train_ccsa(&data, &base).reconstruction_mse(&data);
@@ -408,6 +440,7 @@ mod tests {
             epochs: 50,
             lr: 0.3,
             temperature: 1.0,
+            uniformity_weight: 0.0,
             seed: 7,
         };
         let model = train_ccsa(&data, &cfg);
@@ -418,5 +451,52 @@ mod tests {
         idx.build();
         let hits = idx.search(&code.to_sparse_vec(), 1);
         assert_eq!(hits.first().map(|(d, _)| *d), Some(0));
+    }
+
+    #[test]
+    fn uniformity_balances_usage() {
+        // Many similar inputs: reconstruction alone tends to map them to the same
+        // code (collapse), concentrating dimension usage. The uniformity
+        // regularizer should spread usage and lower its variance.
+        let data: Vec<Vec<f32>> = (0..12)
+            .map(|i| {
+                let t = i as f32 * 0.02;
+                vec![1.0 + t, 0.5 - t, 0.2 + t, 0.8 - t]
+            })
+            .collect();
+        let base = CcsaTrainConfig {
+            code: CompositeCodeConfig::new(2, 4),
+            input_dim: 4,
+            epochs: 300,
+            lr: 0.3,
+            temperature: 1.0,
+            uniformity_weight: 0.0,
+            seed: 1,
+        };
+        let usage_variance = |w: f32| -> f32 {
+            let model = train_ccsa(
+                &data,
+                &CcsaTrainConfig {
+                    uniformity_weight: w,
+                    ..base
+                },
+            );
+            let d = base.code.dim();
+            let l = base.code.chunk_size;
+            let mut usage = vec![0.0f32; d];
+            for x in &data {
+                for (c, &a) in model.encode(x).unwrap().active().iter().enumerate() {
+                    usage[c * l + a] += 1.0;
+                }
+            }
+            let mean = usage.iter().sum::<f32>() / d as f32;
+            usage.iter().map(|u| (u - mean).powi(2)).sum::<f32>() / d as f32
+        };
+        let var_plain = usage_variance(0.0);
+        let var_uniform = usage_variance(5.0);
+        assert!(
+            var_uniform < var_plain,
+            "uniformity should balance usage: variance {var_plain} -> {var_uniform}"
+        );
     }
 }

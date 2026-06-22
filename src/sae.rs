@@ -10,10 +10,10 @@
 //! `CompositeCode::to_sparse_vec` adapts a code into the [`SparseVec`] the
 //! existing [`SporseIndex`](crate::SporseIndex) already serves.
 //!
-//! Scope: this is the serving path (given encoder logits from a trained CCSA,
-//! produce composite codes and index them). Training the encoder weights
-//! (reconstruction + uniformity loss, Gumbel-Softmax straight-through, autodiff)
-//! is a separate, heavier concern and is not implemented here.
+//! This module covers the full pipeline: `train_ccsa` fits the encoder/decoder
+//! (reconstruction MSE + optional uniformity regularizer, Gumbel-Softmax
+//! straight-through, hand-derived gradients, dependency-free), `CcsaModel::encode`
+//! produces composite codes, and `CompositeCode::to_sparse_vec` feeds the index.
 
 use crate::SparseVec;
 
@@ -110,14 +110,21 @@ impl Lcg {
     fn new(seed: u64) -> Self {
         Self(seed ^ 0x9E37_79B9_7F4A_7C15)
     }
-    /// Next value in roughly `[-0.1, 0.1]`.
-    fn next_small(&mut self) -> f32 {
+    fn step(&mut self) -> f32 {
         self.0 = self
             .0
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
-        let u = (self.0 >> 40) as f32 / (1u64 << 24) as f32; // [0, 1)
-        u * 0.2 - 0.1
+        (self.0 >> 40) as f32 / (1u64 << 24) as f32 // [0, 1)
+    }
+    /// Next value in roughly `[-0.1, 0.1]`.
+    fn next_small(&mut self) -> f32 {
+        self.step() * 0.2 - 0.1
+    }
+    /// A standard Gumbel(0, 1) sample, `-ln(-ln(u))` with `u` in `(0, 1)`.
+    fn gumbel(&mut self) -> f32 {
+        let u = self.step().clamp(f32::MIN_POSITIVE, 1.0 - f32::EPSILON);
+        -(-u.ln()).ln()
     }
 }
 
@@ -138,7 +145,12 @@ pub struct CcsaTrainConfig {
     /// per-dimension usage toward uniform and prevents code collapse. `0.0`
     /// disables it (reconstruction only).
     pub uniformity_weight: f32,
-    /// Seed for deterministic weight initialization.
+    /// If true, add Gumbel(0,1) noise to the logits before code selection during
+    /// training (stochastic Gumbel-Softmax exploration). Inference
+    /// ([`CcsaModel::encode`]) is always the deterministic argmax. Training stays
+    /// reproducible given `seed`.
+    pub gumbel_noise: bool,
+    /// Seed for deterministic weight initialization (and Gumbel noise).
     pub seed: u64,
 }
 
@@ -153,9 +165,10 @@ pub struct CcsaTrainConfig {
 /// pass, a straight-through softmax on the backward pass, and an MSE
 /// reconstruction objective trained by gradient descent, with an optional
 /// uniformity / load-balance regularizer (`uniformity_weight`) that prevents
-/// code collapse. Documented simplifications versus the paper: no input
-/// BatchNorm (normalize externally) and no Gumbel sampling noise (deterministic
-/// argmax). The gradients are hand-derived; the `train_reduces_mse` and
+/// code collapse and optional Gumbel-Softmax exploration (`gumbel_noise`).
+/// Input normalization (BatchNorm's role in the paper) is provided as the
+/// separate [`standardize`] helper, since the encoder's linear layer absorbs the
+/// affine. The gradients are hand-derived; the `train_reduces_mse` and
 /// `uniformity_balances_usage` tests guard their correctness.
 #[derive(Debug, Clone)]
 pub struct CcsaModel {
@@ -255,10 +268,16 @@ pub fn train_ccsa(data: &[Vec<f32>], cfg: &CcsaTrainConfig) -> CcsaModel {
         let mut g_dec = vec![0.0f32; d_total * m];
 
         for x in data {
-            // Forward: logits, per-chunk softmax (backward) and argmax (forward).
-            let logits: Vec<f32> = (0..d_total)
+            // Forward: logits (optionally Gumbel-noised), per-chunk softmax
+            // (backward) and argmax (forward).
+            let mut logits: Vec<f32> = (0..d_total)
                 .map(|d| dot(&w_enc[d * m..d * m + m], x))
                 .collect();
+            if cfg.gumbel_noise {
+                for v in logits.iter_mut() {
+                    *v += rng.gumbel();
+                }
+            }
             let mut active = vec![0usize; c];
             let mut soft = vec![0.0f32; d_total];
             for cc in 0..c {
@@ -341,6 +360,43 @@ pub fn train_ccsa(data: &[Vec<f32>], cfg: &CcsaTrainConfig) -> CcsaModel {
     }
 }
 
+/// Standardize a dataset in place to zero mean and unit variance per dimension,
+/// returning the per-dimension `(mean, std)` so the same transform can be applied
+/// to query inputs at inference.
+///
+/// This is the input-normalization role BatchNorm plays in the paper. A fixed
+/// standardization (rather than in-model BatchNorm with learnable affine)
+/// suffices here because the encoder's linear layer can absorb any affine.
+#[allow(clippy::needless_range_loop)]
+pub fn standardize(data: &mut [Vec<f32>], input_dim: usize) -> (Vec<f32>, Vec<f32>) {
+    let n = data.len().max(1) as f32;
+    let mut mean = vec![0.0f32; input_dim];
+    for x in data.iter() {
+        for i in 0..input_dim {
+            mean[i] += x[i];
+        }
+    }
+    for i in 0..input_dim {
+        mean[i] /= n;
+    }
+    let mut var = vec![0.0f32; input_dim];
+    for x in data.iter() {
+        for i in 0..input_dim {
+            let d = x[i] - mean[i];
+            var[i] += d * d;
+        }
+    }
+    let std: Vec<f32> = (0..input_dim)
+        .map(|i| (var[i] / n).sqrt().max(1e-6))
+        .collect();
+    for x in data.iter_mut() {
+        for i in 0..input_dim {
+            x[i] = (x[i] - mean[i]) / std[i];
+        }
+    }
+    (mean, std)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +470,7 @@ mod tests {
             lr: 0.5,
             temperature: 1.0,
             uniformity_weight: 0.0,
+            gumbel_noise: false,
             seed: 42,
         };
         let initial = train_ccsa(&data, &base).reconstruction_mse(&data);
@@ -441,6 +498,7 @@ mod tests {
             lr: 0.3,
             temperature: 1.0,
             uniformity_weight: 0.0,
+            gumbel_noise: false,
             seed: 7,
         };
         let model = train_ccsa(&data, &cfg);
@@ -471,6 +529,7 @@ mod tests {
             lr: 0.3,
             temperature: 1.0,
             uniformity_weight: 0.0,
+            gumbel_noise: false,
             seed: 1,
         };
         let usage_variance = |w: f32| -> f32 {
@@ -498,5 +557,46 @@ mod tests {
             var_uniform < var_plain,
             "uniformity should balance usage: variance {var_plain} -> {var_uniform}"
         );
+    }
+
+    #[test]
+    fn gumbel_noise_is_reproducible_and_changes_training() {
+        let data: Vec<Vec<f32>> = vec![
+            vec![1.0, 0.0, 0.3],
+            vec![0.0, 1.0, 0.7],
+            vec![0.5, 0.5, 0.1],
+        ];
+        let base = CcsaTrainConfig {
+            code: CompositeCodeConfig::new(2, 3),
+            input_dim: 3,
+            epochs: 60,
+            lr: 0.3,
+            temperature: 1.0,
+            uniformity_weight: 0.0,
+            gumbel_noise: true,
+            seed: 9,
+        };
+        // Same seed reproduces exactly, despite the noise.
+        let a = train_ccsa(&data, &base);
+        let b = train_ccsa(&data, &base);
+        assert_eq!(a.reconstruct(&data[0]), b.reconstruct(&data[0]));
+        // Gumbel on vs off changes the training trajectory.
+        let off = train_ccsa(
+            &data,
+            &CcsaTrainConfig {
+                gumbel_noise: false,
+                ..base
+            },
+        );
+        assert_ne!(a.reconstruct(&data[0]), off.reconstruct(&data[0]));
+    }
+
+    #[test]
+    fn standardize_centers_and_scales() {
+        let mut data = vec![vec![10.0, 0.0], vec![20.0, 4.0], vec![30.0, -4.0]];
+        let (mean, _std) = standardize(&mut data, 2);
+        assert!((mean[0] - 20.0).abs() < 1e-4, "mean {}", mean[0]);
+        let m0: f32 = data.iter().map(|x| x[0]).sum::<f32>() / 3.0;
+        assert!(m0.abs() < 1e-4, "post-standardize mean {m0}");
     }
 }

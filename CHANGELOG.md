@@ -12,12 +12,14 @@ All notable changes to this project are documented here. Format based on [Keep a
   size `L`) and `to_sparse_vec` feeds the existing index. `train_ccsa` trains the
   shallow linear encoder/decoder with hand-derived straight-through gradients and
   gradient descent (dependency-free f32; no autodiff framework), returning a
-  `CcsaModel` whose `encode` produces codes for the index. An optional
-  uniformity / load-balance regularizer (`uniformity_weight`) spreads
-  per-dimension usage and prevents code collapse. Remaining simplifications
-  versus the paper: no input BatchNorm (normalize externally) and no Gumbel
-  sampling noise (deterministic argmax). `train_reduces_mse` and
-  `uniformity_balances_usage` tests guard the gradient derivations.
+  `CcsaModel` whose `encode` produces codes for the index. Optional
+  uniformity / load-balance regularization (`uniformity_weight`) spreads
+  per-dimension usage and prevents code collapse; optional Gumbel-Softmax
+  exploration (`gumbel_noise`) adds stochastic code selection during training
+  (reproducible given the seed). A `standardize` helper provides the input
+  normalization that BatchNorm plays in the paper. `train_reduces_mse`,
+  `uniformity_balances_usage`, and the Gumbel reproducibility test guard the
+  gradient derivations.
 - Expanded examples for impact-score walkthroughs, WAND diagnostics, and serde
   round-trips.
 - Restored the public `innr` feature as a compatibility no-op after the

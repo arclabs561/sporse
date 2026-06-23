@@ -436,6 +436,55 @@ mod tests {
     }
 
     #[test]
+    fn c_hot_and_argmax_hold_across_configs() {
+        // Generalizes composite_code_is_c_hot from one fixture to a sweep over
+        // (C, L) with random logits: from_logits must yield exactly C active
+        // indices, each in 0..L and each the (first-max) argmax of its own
+        // chunk. Recomputing the argmax independently risks the per-chunk
+        // slicing across the configuration space, not just at C=3, L=4.
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            // xorshift64; map to [0, 1).
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        };
+        for &chunks in &[1usize, 2, 3, 5, 8] {
+            for &chunk_size in &[1usize, 2, 4, 7] {
+                let cfg = CompositeCodeConfig::new(chunks, chunk_size);
+                let logits: Vec<f32> = (0..chunks * chunk_size).map(|_| next()).collect();
+                let code = CompositeCode::from_logits(&logits, cfg).unwrap();
+                assert_eq!(
+                    code.active().len(),
+                    chunks,
+                    "must be C-hot at C={chunks}, L={chunk_size}"
+                );
+                for (chunk, &idx) in code.active().iter().enumerate() {
+                    assert!(
+                        idx < chunk_size,
+                        "active index {idx} out of range L={chunk_size}"
+                    );
+                    // Independent first-max argmax, mirroring `argmax`'s `>` tie-break.
+                    let base = chunk * chunk_size;
+                    let mut best = 0usize;
+                    let mut best_v = f32::NEG_INFINITY;
+                    for (i, &x) in logits[base..base + chunk_size].iter().enumerate() {
+                        if x > best_v {
+                            best_v = x;
+                            best = i;
+                        }
+                    }
+                    assert_eq!(
+                        idx, best,
+                        "chunk {chunk} active index disagrees with argmax"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn round_trip_through_index_ranks_matching_doc_first() {
         let cfg = CompositeCodeConfig::new(2, 4);
         // doc A: chunks -> [0, 0]; doc B: chunks -> [3, 3].

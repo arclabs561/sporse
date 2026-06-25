@@ -35,6 +35,10 @@ Runnable examples live in [`examples/`](examples/):
   how many documents Block-Max WAND scored.
 - `serde_roundtrip.rs` verifies built-index serialization with the `serde`
   feature.
+- `hybrid_retrieval.rs` composes this sparse index with vicinity's dense HNSW and
+  rankops reciprocal-rank fusion: a document ranked second by both retrievers (the
+  only one strong on both signals) wins the fused ranking over the documents that
+  top only one.
 
 ## Features
 

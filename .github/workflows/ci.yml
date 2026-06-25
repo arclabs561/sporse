@@ -21,6 +21,10 @@ jobs:
         run: cargo build --all-features
       - name: Test
         run: cargo test --all-features
+      - name: Run example assertions
+        run: |
+          cargo run --example wand_diagnostics
+          cargo run --example serde_roundtrip --features serde
       - name: Doc
         run: cargo doc --all-features --no-deps
         env:

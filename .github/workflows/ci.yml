@@ -26,6 +26,7 @@ jobs:
           cargo run --example wand_diagnostics
           cargo run --example serde_roundtrip --features serde
           cargo run --example hybrid_retrieval
+          cargo run --example ccsa_retrieval
       - name: Doc
         run: cargo doc --all-features --no-deps
         env:

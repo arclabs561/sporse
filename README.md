@@ -8,6 +8,10 @@ documents that provably cannot enter the top-k, so the result is identical to an
 exhaustive scan over the same scores (the `wand_diagnostics` example verifies
 this parity).
 
+The `sae` module also *learns* sparse codes rather than only serving them: a
+Composite-Code Sparse Autoencoder (CCSA, arXiv:2204.07023) encodes dense vectors
+into C-hot composite codes for this same index (the `ccsa_retrieval` example).
+
 ## Usage
 
 ```rust
@@ -39,6 +43,9 @@ Runnable examples live in [`examples/`](examples/):
   rankops reciprocal-rank fusion: a document ranked second by both retrievers (the
   only one strong on both signals) wins the fused ranking over the documents that
   top only one.
+- `ccsa_retrieval.rs` trains a Composite-Code Sparse Autoencoder (CCSA), encodes
+  documents into C-hot codes, indexes them, and shows a query retrieving
+  same-cluster documents.
 
 ## Features
 

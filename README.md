@@ -2,8 +2,10 @@
 
 Sparse vector index for learned sparse retrieval.
 
-Indexes sparse vectors (SPLADE, LADE) using an inverted index. Top-k inner
-product search uses Block-Max WAND, a safe dynamic-pruning traversal: it skips
+Indexes sparse vectors using an inverted index, whether the dimensions are
+lexical (SPLADE-style vocabulary-term weights) or latent (the composite codes
+the `sae` module learns). Top-k inner product search uses Block-Max WAND, a
+safe dynamic-pruning traversal: it skips
 documents that provably cannot enter the top-k, so the result is identical to an
 exhaustive scan over the same scores (the `wand_diagnostics` example verifies
 this parity).
@@ -58,5 +60,8 @@ Runnable examples live in [`examples/`](examples/):
 - Ding and Suel, "Faster Top-k Document Retrieval Using Block-Max Indexes"
   (SIGIR 2011). The block-max refinement this crate implements.
 - Formal, Piwowarski, and Clinchant, "SPLADE: Sparse Lexical and Expansion Model
-  for First Stage Ranking" (arXiv:2107.05720). The learned sparse
+  for First Stage Ranking" (arXiv:2107.05720). The lexical learned sparse
   representations this index is built to serve.
+- Lassance, Formal, and Clinchant, "Composite Code Sparse Autoencoders for First
+  Stage Retrieval" (arXiv:2204.07023). The latent C-hot composite codes the
+  `sae` module learns.

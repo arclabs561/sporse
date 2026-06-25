@@ -1,8 +1,9 @@
 //! Sparse vector index for learned sparse retrieval.
 //!
-//! Indexes sparse vectors (SPLADE, LADE, learned sparse representations)
-//! using an inverted index with Block-Max WAND traversal for exact top-k
-//! inner product search.
+//! Indexes sparse vectors using an inverted index with Block-Max WAND
+//! traversal for exact top-k inner product search. The vectors can be lexical
+//! (SPLADE-style vocabulary-term weights) or latent (the composite codes the
+//! `sae` module learns); the index treats both the same way.
 //!
 //! # Quick start
 //!

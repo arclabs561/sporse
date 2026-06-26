@@ -65,6 +65,10 @@ cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [
 
 - `serde` -- Serialize/Deserialize for `SparseVec`
 - `cli` -- the `sporse` binary (build and query an index from files)
+- `store` -- `store::UpdatableIndex`: an updatable, durable index (incremental
+  add/delete, write-ahead log, checkpoint, compaction, crash recovery) backed by
+  [`segstore`](https://crates.io/crates/segstore). Per-segment indexes are cached
+  and rebuilt only on mutation, not per query.
 
 ## References
 

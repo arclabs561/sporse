@@ -4,6 +4,16 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-26
+
+### Added
+
+- Optional `store` feature: `store::UpdatableIndex`, an updatable, durable
+  learned-sparse index backed by [`segstore`](https://crates.io/crates/segstore)
+  (write-ahead log, checkpoint, compaction, crash recovery), driving the
+  Block-Max WAND engine per segment. Opt-in; the default build does not depend on
+  segstore.
+
 ## [0.4.0] - 2026-06-24
 
 ### Added

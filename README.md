@@ -51,9 +51,20 @@ Runnable examples live in [`examples/`](examples/):
   same-cluster documents. This is how you make dense embeddings searchable in an
   inverted index: learn a sparse code instead of running a brute-force dense scan.
 
+## CLI
+
+With the `cli` feature, the `sporse` binary builds and queries an index from
+files (one `{"id": u32, "vec": [[dim, weight], ...]}` per line):
+
+```sh
+cargo run --features cli --bin sporse -- build docs.jsonl -o index.json
+cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [3, 1.0]]' -k 5
+```
+
 ## Features
 
 - `serde` -- Serialize/Deserialize for `SparseVec`
+- `cli` -- the `sporse` binary (build and query an index from files)
 
 ## References
 

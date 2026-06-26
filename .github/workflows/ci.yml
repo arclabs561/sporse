@@ -27,6 +27,13 @@ jobs:
           cargo run --example serde_roundtrip --features serde
           cargo run --example hybrid_retrieval
           cargo run --example ccsa_retrieval
+      - name: CLI smoke
+        run: |
+          printf '{"id":0,"vec":[[0,1.0],[3,2.5]]}\n{"id":1,"vec":[[3,1.0]]}\n' > /tmp/d.jsonl
+          cargo run --features cli --bin sporse -- build /tmp/d.jsonl -o /tmp/i.json
+          out=$(cargo run --features cli --bin sporse -- search /tmp/i.json --query '[[0,1.0],[3,1.0]]' -k 2)
+          echo "$out"
+          echo "$out" | head -1 | grep -q '^0' || { echo "FAIL: doc 0 should rank first"; exit 1; }
       - name: Doc
         run: cargo doc --all-features --no-deps
         env:

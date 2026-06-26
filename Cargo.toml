@@ -17,12 +17,20 @@ categories = ["algorithms", "data-structures"]
 [features]
 default = []
 serde = ["dep:serde"]
+# `cli` builds the `sporse` binary (build + query an index from files).
+cli = ["serde", "dep:clap", "dep:serde_json"]
 # Compatibility feature retained for crates that enabled the former optional
 # `innr` integration. The integration no longer needs an extra dependency.
 innr = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"], optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[[bin]]
+name = "sporse"
+required-features = ["cli"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

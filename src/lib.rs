@@ -32,6 +32,10 @@ mod wand;
 /// Composite-code sparse-autoencoder codes (CCSA) and their index integration.
 pub mod sae;
 
+/// Updatable, durable index backed by segstore (the optional `store` feature).
+#[cfg(feature = "store")]
+pub mod store;
+
 use std::collections::HashMap;
 
 // ── SparseVec ────────────────────────────────────────────────────────────────

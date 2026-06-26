@@ -19,6 +19,9 @@ default = []
 serde = ["dep:serde"]
 # `cli` builds the `sporse` binary (build + query an index from files).
 cli = ["serde", "dep:clap", "dep:serde_json"]
+# `store` adds an updatable, durable index (`store::UpdatableIndex`) backed by
+# segstore: incremental add/delete + write-ahead log + checkpoint + compaction.
+store = ["serde", "dep:segstore", "dep:durability"]
 # Compatibility feature retained for crates that enabled the former optional
 # `innr` integration. The integration no longer needs an extra dependency.
 innr = []
@@ -27,6 +30,8 @@ innr = []
 serde = { version = "1", features = ["derive"], optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+segstore = { version = "0.1", optional = true }
+durability = { version = "0.6", optional = true }
 
 [[bin]]
 name = "sporse"

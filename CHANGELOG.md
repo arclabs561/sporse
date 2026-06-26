@@ -4,6 +4,14 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-26
+
+### Fixed
+
+- `store::UpdatableIndex` no longer rebuilds the per-segment indexes on every
+  query. They are cached and rebuilt only when a mutation (add/delete/compact)
+  occurs, so query cost no longer grows with the corpus on each call.
+
 ## [0.5.0] - 2026-06-26
 
 ### Added

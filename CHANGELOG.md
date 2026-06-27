@@ -4,6 +4,14 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-06-27
+
+### Added
+
+- `store::UpdatableIndex::compact_tiers()`: one round of size-tiered compaction
+  (merge similarly-sized segments), keeping segment count bounded without a full
+  `compact()`.
+
 ## [0.6.1] - 2026-06-27
 
 ### Added

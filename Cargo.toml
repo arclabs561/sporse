@@ -47,6 +47,10 @@ rankops = "0.1.10"
 name = "search"
 harness = false
 
+[[bench]]
+name = "store"
+harness = false
+
 [[example]]
 name = "hybrid_retrieval"
 

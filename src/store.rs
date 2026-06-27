@@ -98,9 +98,15 @@ impl UpdatableIndex {
     /// Tombstone a document.
     pub fn delete(&mut self, id: u32) -> PersistenceResult<()> {
         self.inner.delete(id)?;
-        // A tombstone changes the live filter used to build every segment's index,
-        // so invalidate the cache (deletes are far rarer than adds).
-        self.cache.borrow_mut().by_ptr.clear();
+        // A tombstone only changes the live-set of the segment that holds `id`, so
+        // invalidate just that segment's cached index -- not the whole cache. The
+        // other segments' indexes stay valid and are reused on the next query.
+        let mut cache = self.cache.borrow_mut();
+        for seg in self.inner.segments() {
+            if seg.iter().any(|(sid, _)| *sid == id) {
+                cache.by_ptr.remove(&(Arc::as_ptr(seg) as usize));
+            }
+        }
         Ok(())
     }
 
@@ -262,5 +268,46 @@ mod tests {
         let q = SparseVec::new(vec![(0, 1.0)]);
         let top: Vec<u32> = store.search(&q, 5).into_iter().map(|(id, _)| id).collect();
         assert_eq!(top, vec![3], "only the live doc remains after reclaim");
+    }
+
+    #[test]
+    fn delete_invalidates_only_the_holding_segment() {
+        let dir = MemoryDirectory::arc();
+        let mut store = UpdatableIndex::open(dir, 2).unwrap();
+        // 4 docs at flush_threshold 2 -> two sealed segments {0,1} and {2,3}.
+        for i in 0..4u32 {
+            store
+                .add(i, SparseVec::new(vec![(0, 1.0 + i as f32)]))
+                .unwrap();
+        }
+        store.checkpoint().unwrap();
+
+        // Populate the cache.
+        let q = SparseVec::new(vec![(0, 1.0)]);
+        let _ = store.search(&q, 4);
+        assert_eq!(store.cache.borrow().by_ptr.len(), 2, "both segments cached");
+
+        // Pointer of the segment that holds id 0.
+        let holder = store
+            .inner
+            .segments()
+            .iter()
+            .find(|s| s.iter().any(|(id, _)| *id == 0))
+            .map(|s| Arc::as_ptr(s) as usize)
+            .unwrap();
+
+        store.delete(0).unwrap();
+
+        let keys: std::collections::HashSet<usize> =
+            store.cache.borrow().by_ptr.keys().copied().collect();
+        assert!(!keys.contains(&holder), "holding segment was invalidated");
+        assert_eq!(keys.len(), 1, "the other segment's cache was preserved");
+
+        // Search remains correct: doc 0 is gone, 1/2/3 remain.
+        let top: Vec<u32> = store.search(&q, 4).into_iter().map(|(id, _)| id).collect();
+        assert!(
+            !top.contains(&0) && top.contains(&1),
+            "delete correct: {top:?}"
+        );
     }
 }

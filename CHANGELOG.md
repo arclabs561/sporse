@@ -4,6 +4,14 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-27
+
+### Added
+
+- `store::UpdatableIndex::reclaim(min_live_ratio)` and `space_amplification()`
+  (via the new `Store::live_len`): cheap tombstone reclamation, merging only the
+  delete-heavy segments instead of a full compaction.
+
 ## [0.6.0] - 2026-06-27
 
 ### Changed

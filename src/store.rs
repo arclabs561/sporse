@@ -55,6 +55,10 @@ impl Store for SparseBacking {
     fn segment_len(&self, seg: &Vec<(u32, SparseVec)>) -> usize {
         seg.len()
     }
+
+    fn live_len(&self, seg: &Vec<(u32, SparseVec)>, live: &dyn Fn(&u32) -> bool) -> Option<usize> {
+        Some(seg.iter().filter(|(id, _)| live(id)).count())
+    }
 }
 
 /// Per-segment indexes keyed by the segment's stable `Arc` identity. Because
@@ -109,6 +113,20 @@ impl UpdatableIndex {
     /// Persist a checkpoint without merging.
     pub fn checkpoint(&mut self) -> PersistenceResult<()> {
         self.inner.checkpoint()
+    }
+
+    /// Merge only the segments whose live ratio is below `min_live_ratio`,
+    /// reclaiming tombstoned documents -- the cheap alternative to a full
+    /// [`compact`](Self::compact) when a few segments are delete-heavy.
+    pub fn reclaim(&mut self, min_live_ratio: f64) -> PersistenceResult<()> {
+        self.inner.reclaim_tombstones(min_live_ratio)?;
+        Ok(())
+    }
+
+    /// Storage amplification: stored documents divided by live documents (`1.0`
+    /// when there are no tombstones, higher as deletes accumulate).
+    pub fn space_amplification(&self) -> Option<f64> {
+        self.inner.space_amplification()
     }
 
     /// Top-k documents by Block-Max WAND inner product over the live corpus.
@@ -208,5 +226,34 @@ mod tests {
         let q = SparseVec::new(vec![(0, 1.0), (3, 1.0)]);
         let top: Vec<u32> = store.search(&q, 3).into_iter().map(|(id, _)| id).collect();
         assert_eq!(top, vec![1, 2], "recovery preserves results");
+    }
+
+    #[test]
+    fn reclaim_drops_tombstone_heavy_segments() {
+        let dir = MemoryDirectory::arc();
+        let mut store = UpdatableIndex::open(dir, 2).unwrap();
+        for i in 0..4u32 {
+            store
+                .add(i, SparseVec::new(vec![(0, 1.0 + i as f32)]))
+                .unwrap();
+        }
+        store.checkpoint().unwrap();
+        store.delete(0).unwrap();
+        store.delete(1).unwrap();
+        store.delete(2).unwrap();
+
+        let before = store.space_amplification().unwrap();
+        assert!(before > 1.0, "tombstones inflate stored/live: {before}");
+        store.reclaim(0.9).unwrap();
+        let after = store.space_amplification().unwrap();
+        assert!(
+            after <= before,
+            "reclaim must not grow space amp: {before} -> {after}"
+        );
+
+        // The one surviving doc is still searchable.
+        let q = SparseVec::new(vec![(0, 1.0)]);
+        let top: Vec<u32> = store.search(&q, 5).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(top, vec![3], "only the live doc remains after reclaim");
     }
 }

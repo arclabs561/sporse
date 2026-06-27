@@ -19,6 +19,7 @@
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use durability::{Directory, PersistenceResult};
@@ -50,19 +51,23 @@ impl Store for SparseBacking {
             .cloned()
             .collect()
     }
+
+    fn segment_len(&self, seg: &Vec<(u32, SparseVec)>) -> usize {
+        seg.len()
+    }
 }
 
-/// Cached per-segment indexes, valid for a given mutation generation.
+/// Per-segment indexes keyed by the segment's stable `Arc` identity. Because
+/// segstore keeps an unchanged segment's `Arc` across mutations, a sealed add
+/// only builds the one new segment's index (the rest are reused) instead of
+/// rebuilding the whole corpus -- the dominant cost in an add-then-search loop.
 struct Cache {
-    generation: u64,
-    segments: Vec<Option<SporseIndex>>,
+    by_ptr: HashMap<usize, Option<SporseIndex>>,
 }
 
 /// An updatable, durable learned-sparse index.
 pub struct UpdatableIndex {
     inner: SegmentedStore<SparseBacking>,
-    /// Bumped on every mutation; invalidates the cache.
-    generation: u64,
     cache: RefCell<Cache>,
 }
 
@@ -72,33 +77,32 @@ impl UpdatableIndex {
     pub fn open(dir: Arc<dyn Directory>, flush_threshold: usize) -> PersistenceResult<Self> {
         Ok(Self {
             inner: SegmentedStore::open(dir, SparseBacking, flush_threshold)?,
-            generation: 0,
-            // A generation the first query cannot match forces an initial build.
             cache: RefCell::new(Cache {
-                generation: u64::MAX,
-                segments: Vec::new(),
+                by_ptr: HashMap::new(),
             }),
         })
     }
 
     /// Add (or re-add) a document by id.
     pub fn add(&mut self, id: u32, vec: SparseVec) -> PersistenceResult<()> {
+        // A sealed add introduces a new segment (a new Arc identity); existing
+        // segments keep theirs, so the cache reuses them and builds only the new one.
         self.inner.add(id, vec)?;
-        self.generation += 1;
         Ok(())
     }
 
     /// Tombstone a document.
     pub fn delete(&mut self, id: u32) -> PersistenceResult<()> {
         self.inner.delete(id)?;
-        self.generation += 1;
+        // A tombstone changes the live filter used to build every segment's index,
+        // so invalidate the cache (deletes are far rarer than adds).
+        self.cache.borrow_mut().by_ptr.clear();
         Ok(())
     }
 
     /// Merge segments (dropping tombstoned docs) and persist a checkpoint.
     pub fn compact(&mut self) -> PersistenceResult<()> {
         self.inner.compact()?;
-        self.generation += 1;
         Ok(())
     }
 
@@ -109,11 +113,23 @@ impl UpdatableIndex {
 
     /// Top-k documents by Block-Max WAND inner product over the live corpus.
     pub fn search(&self, query: &SparseVec, k: usize) -> Vec<(u32, f32)> {
-        self.refresh_cache();
         let mut cand: Vec<(u32, f32)> = Vec::new();
         {
-            let cache = self.cache.borrow();
-            for idx in cache.segments.iter().flatten() {
+            let segs = self.inner.segments();
+            let mut cache = self.cache.borrow_mut();
+            // Drop cached indexes for segments no longer present (post-compaction).
+            let current: std::collections::HashSet<usize> =
+                segs.iter().map(|a| Arc::as_ptr(a) as usize).collect();
+            cache.by_ptr.retain(|key, _| current.contains(key));
+            // Build only segments not already cached (i.e. new ones).
+            for seg in segs {
+                let key = Arc::as_ptr(seg) as usize;
+                cache
+                    .by_ptr
+                    .entry(key)
+                    .or_insert_with(|| self.build_live_index(&seg[..]));
+            }
+            for idx in cache.by_ptr.values().flatten() {
                 cand.extend(idx.search(query, k));
             }
         }
@@ -125,19 +141,6 @@ impl UpdatableIndex {
         cand.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
         cand.truncate(k);
         cand
-    }
-
-    /// Rebuild the per-segment cache iff a mutation has occurred since it was built.
-    fn refresh_cache(&self) {
-        let mut cache = self.cache.borrow_mut();
-        if cache.generation == self.generation {
-            return;
-        }
-        cache.segments.clear();
-        for seg in self.inner.segments() {
-            cache.segments.push(self.build_live_index(seg));
-        }
-        cache.generation = self.generation;
     }
 
     /// Build a `SporseIndex` over the live documents of `items` (None if empty).

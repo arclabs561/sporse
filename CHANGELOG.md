@@ -4,6 +4,16 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-27
+
+### Changed
+
+- `store::UpdatableIndex` now caches each segment's index by the segment's stable
+  `Arc` identity (via segstore 0.2), so a mutation rebuilds only the new or
+  changed segments instead of the whole corpus on the next query.
+- Requires `segstore` 0.2 (only affects the optional `store` feature; the on-disk
+  store format changed, so a `store` index written by 0.5.x is not read by 0.6.0).
+
 ## [0.5.1] - 2026-06-26
 
 ### Fixed

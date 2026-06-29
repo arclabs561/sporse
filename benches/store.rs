@@ -102,6 +102,56 @@ fn benches(c: &mut Criterion) {
 }
 
 #[cfg(feature = "store")]
-criterion_group!(g, benches);
+fn ingest_fs(c: &mut Criterion) {
+    // The extend() win is invisible on MemoryDirectory (flush is free); on a real
+    // filesystem the per-item WAL flush is the cost extend amortizes into one batch
+    // sync. add-per-item vs extend over the same documents.
+    use durability::FsDirectory;
+    let mut g = c.benchmark_group("ingest_fs");
+    let n = 4_000usize;
+    g.throughput(Throughput::Elements(n as u64));
+    let mk = |tag: &str| {
+        let mut p = std::env::temp_dir();
+        p.push(format!("sporse-bench-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        p
+    };
+    g.bench_function("add", |b| {
+        b.iter_batched(
+            || mk("add"),
+            |p| {
+                let mut s = 0x1234_5678_9abc_def0u64;
+                let mut store =
+                    sporse::store::UpdatableIndex::open(FsDirectory::arc(&p).unwrap(), FLUSH)
+                        .unwrap();
+                for i in 0..n {
+                    store.add(i as u32, doc(&mut s)).unwrap();
+                }
+                let _ = std::fs::remove_dir_all(&p);
+            },
+            BatchSize::PerIteration,
+        )
+    });
+    g.bench_function("extend", |b| {
+        b.iter_batched(
+            || mk("extend"),
+            |p| {
+                let mut s = 0x1234_5678_9abc_def0u64;
+                let mut store =
+                    sporse::store::UpdatableIndex::open(FsDirectory::arc(&p).unwrap(), FLUSH)
+                        .unwrap();
+                store
+                    .extend((0..n).map(|i| (i as u32, doc(&mut s))))
+                    .unwrap();
+                let _ = std::fs::remove_dir_all(&p);
+            },
+            BatchSize::PerIteration,
+        )
+    });
+    g.finish();
+}
+
+#[cfg(feature = "store")]
+criterion_group!(g, benches, ingest_fs);
 #[cfg(feature = "store")]
 criterion_main!(g);

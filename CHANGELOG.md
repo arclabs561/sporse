@@ -2,7 +2,19 @@
 
 All notable changes to this project are documented here. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.4] - 2026-06-28
+
+### Added
+
+- `store::UpdatableIndex::extend(docs)`: bulk ingest that syncs the write-ahead log
+  once per batch instead of once per document. ~2.1x faster than a loop of `add`
+  for a corpus load on a real filesystem (bench `ingest_fs`: 17.9ms vs 8.4ms / 4000
+  docs).
+
+### Changed
+
+- The `store` feature now requires `segstore = "0.3"`; the internal `merge_segments`
+  takes `&[&Segment]` (segstore 0.3's by-reference signature).
 
 ## [0.6.3] - 2026-06-27
 

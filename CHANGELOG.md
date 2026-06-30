@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- The `store` feature now persists per-segment WAND sidecars containing finalized
+  posting lists and block-max metadata, and loads them on restart when the recipe
+  and live id set still match. On `benches/store.rs` (`N_DOCS=20_000`,
+  `VOCAB=30_000`, `DOC_NNZ=80`, `FLUSH=2_000`), cold restart search with
+  sidecars measured `[31.390 ms 31.937 ms 32.538 ms]` versus
+  `[105.88 ms 107.20 ms 108.85 ms]` when sidecars were missing and every segment
+  had to rebuild.
+
+### Changed
+
+- The `store` feature now requires `segstore = "0.4"` and `postcard`.
+
 ## [0.6.4] - 2026-06-28
 
 ### Added

@@ -3,11 +3,10 @@
 //! Run: `cargo bench --features store --bench store`. Without the feature the
 //! harness is an empty no-op so the bench target still compiles.
 //!
-//! Measures the three costs that matter for an updatable WAND index: build
-//! throughput, warm query latency (per-segment indexes cached), and the cold
-//! "rebuild every segment" cost -- the latter is what a delete that clears the
-//! whole cache incurs, and what the targeted-invalidation delete avoids
-//! (a delete rebuilds one segment, i.e. ~1/segments of the cold cost).
+//! Measures the costs that matter for an updatable WAND index: build throughput,
+//! warm query latency (per-segment indexes cached), cold restart latency with
+//! persisted sidecars, and the cold rebuild cost when sidecars are missing or
+//! stale.
 
 #[cfg(not(feature = "store"))]
 fn main() {}
@@ -50,19 +49,29 @@ fn doc(state: &mut u64) -> sporse::SparseVec {
 }
 
 #[cfg(feature = "store")]
-fn fresh_store(warm: bool) -> (sporse::store::UpdatableIndex, sporse::SparseVec) {
+fn fresh_store(
+    warm: bool,
+    checkpoint: bool,
+) -> (
+    std::sync::Arc<dyn durability::Directory>,
+    sporse::store::UpdatableIndex,
+    sporse::SparseVec,
+) {
     use durability::MemoryDirectory;
     let mut s = 0x1234_5678_9abc_def0u64;
-    let mut store = sporse::store::UpdatableIndex::open(MemoryDirectory::arc(), FLUSH).unwrap();
+    let dir = MemoryDirectory::arc();
+    let mut store = sporse::store::UpdatableIndex::open(dir.clone(), FLUSH).unwrap();
     for i in 0..N_DOCS {
         store.add(i as u32, doc(&mut s)).unwrap();
     }
-    store.checkpoint().unwrap();
+    if checkpoint {
+        store.checkpoint().unwrap();
+    }
     let q = doc(&mut s);
     if warm {
         let _ = store.search(&q, 10); // populate the per-segment cache
     }
-    (store, q)
+    (dir, store, q)
 }
 
 #[cfg(feature = "store")]
@@ -75,24 +84,36 @@ fn benches(c: &mut Criterion) {
         b.iter_batched(
             || (),
             |_| {
-                let _ = fresh_store(false);
+                let _ = fresh_store(false, true);
             },
             BatchSize::SmallInput,
         )
     });
 
     // Warm query: every segment's index already cached.
-    let (warm, q) = fresh_store(true);
+    let (_, warm, q) = fresh_store(true, true);
     g.bench_function("search_warm", |b| {
         b.iter(|| warm.search(&q, 10));
     });
 
-    // Cold query: no segment cached, so the first query rebuilds every segment.
-    // This is the cost a delete-clears-the-whole-cache pays; targeted delete
-    // invalidation rebuilds one segment instead.
-    g.bench_function("search_cold_rebuild_all", |b| {
+    g.bench_function("search_cold_load_sidecars", |b| {
         b.iter_batched(
-            || fresh_store(false),
+            || {
+                let (dir, _, q) = fresh_store(false, true);
+                let store = sporse::store::UpdatableIndex::open(dir, FLUSH).unwrap();
+                (store, q)
+            },
+            |(store, q)| store.search(&q, 10),
+            BatchSize::SmallInput,
+        )
+    });
+
+    g.bench_function("search_cold_rebuild_missing_sidecars", |b| {
+        b.iter_batched(
+            || {
+                let (_, store, q) = fresh_store(false, false);
+                (store, q)
+            },
             |(store, q)| store.search(&q, 10),
             BatchSize::SmallInput,
         )

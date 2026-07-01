@@ -3,11 +3,8 @@
 //!
 //! CCSA (Lassance, Formal, and Clinchant 2022, arXiv:2204.07023) learns a
 //! C-hot composite code for each dense vector: one active dimension per chunk.
-//! Those codes drop straight into sporse's inverted index, so a learned sparse
-//! representation becomes searchable with the same Block-Max WAND traversal as
-//! any SPLADE vector. This trains a CCSA on clustered data, encodes each
-//! document into its composite code, indexes the codes, and shows that a query
-//! retrieves a document from its own cluster.
+//! This example trains CCSA on clustered data, indexes the encoded documents,
+//! and reports reconstruction error plus the retrieved document labels.
 //!
 //! Run: `cargo run --example ccsa_retrieval`
 
@@ -85,12 +82,11 @@ fn main() {
         .collect();
     println!("top-3 (doc_id, cluster): {labeled:?}");
 
-    // The CCSA codes preserve cluster structure: a cluster-0 query retrieves a
-    // cluster-0 document. A broken encoder or index would not.
+    // The assertion checks the top result's label for the cluster-0 query.
     let top = hits[0].0 as usize;
     assert_eq!(
         labels[top], 0,
-        "a cluster-0 query should retrieve a cluster-0 document via its CCSA code"
+        "expected a cluster-0 result via the encoded CCSA query"
     );
-    println!("  [PASS] CCSA codes index and retrieve, returning a same-cluster document");
+    println!("top result cluster: {}", labels[top]);
 }

@@ -1,11 +1,9 @@
 //! Hybrid retrieval: learned-sparse (`sporse`) + dense ANN (`vicinity`), fused
 //! with reciprocal-rank fusion (`rankops`).
 //!
-//! The point of hybrid retrieval is that a document strong on BOTH a sparse
-//! (lexical / learned-term) signal and a dense (semantic) signal should beat a
-//! document strong on only one. This composes sporse's inverted index,
-//! vicinity's HNSW, and rankops RRF to show exactly that: a "both-relevant"
-//! document that is #1 on neither signal alone wins the fused ranking.
+//! Builds separate sparse and dense rankings over inline documents, then fuses
+//! them with reciprocal-rank fusion. The output reports the source top-2 lists
+//! and the fused rank-1 document.
 //!
 //! Run: `cargo run --example hybrid_retrieval`
 
@@ -70,25 +68,29 @@ fn main() {
     let dense_hits = hnsw.search(&dense_query, 5, 50).expect("dense search");
     let sparse_hits = sparse_idx.search(&sparse_query, 5);
 
-    let show = |hits: &[(u32, f32)]| hits.iter().take(3).map(|h| h.0).collect::<Vec<_>>();
-    println!("dense top-3:  {:?}", show(&dense_hits));
-    println!("sparse top-3: {:?}", show(&sparse_hits));
+    let show_n =
+        |hits: &[(u32, f32)], n: usize| hits.iter().take(n).map(|h| h.0).collect::<Vec<_>>();
+    println!("dense top-2:  {:?}", show_n(&dense_hits, 2));
+    println!("sparse top-2: {:?}", show_n(&sparse_hits, 2));
 
     let fused = rrf(&sparse_hits, &dense_hits);
-    println!("fused top-3:  {:?}", show(&fused));
-
     let dense_top = dense_hits[0].0;
     let sparse_top = sparse_hits[0].0;
     let fused_top = fused[0].0;
 
-    // TARGET is #1 on neither signal but wins fusion: it is the only document
-    // ranked highly by both the sparse and the dense retriever.
-    assert_ne!(dense_top, TARGET, "TARGET should not be the dense #1");
-    assert_ne!(sparse_top, TARGET, "TARGET should not be the sparse #1");
+    // TARGET is ranked highly by both source retrievers, but is #1 in neither.
+    assert_ne!(
+        dense_top, TARGET,
+        "target unexpectedly ranked first by dense"
+    );
+    assert_ne!(
+        sparse_top, TARGET,
+        "target unexpectedly ranked first by sparse"
+    );
     assert_eq!(
         fused_top, TARGET,
-        "the both-relevant document should win RRF fusion \
+        "target was not first after RRF fusion \
          (dense#1={dense_top}, sparse#1={sparse_top}, fused#1={fused_top})"
     );
-    println!("  [PASS] doc {TARGET} wins fusion despite being #1 on neither signal alone");
+    println!("fused rank-1 doc: {fused_top}");
 }

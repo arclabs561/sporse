@@ -27,7 +27,7 @@ cargo run --release --example basic
 The output lists ranked documents and the matched sparse dimensions that
 contribute to each score.
 
-Expected excerpt:
+Output excerpt:
 
 ```text
 index: 6 documents, 13 sparse dimensions
@@ -50,7 +50,7 @@ produce the same top-k ranking. The adapter is intentionally local to the
 example; a shared cursor trait still needs two real consumers before becoming
 public API.
 
-Expected excerpt:
+Output excerpt:
 
 ```text
 postings top-k: [(2, 8.45), (3, 4.8), (0, 2.6999998)]
@@ -67,7 +67,7 @@ seed.
 The output reports exact top-k parity against brute force, average WAND loop
 iterations, fully-scored document count, and cursor skips.
 
-Expected output:
+Output:
 
 ```text
 index: 4000 docs, 24000 sparse dimensions, 96 nnz/doc
@@ -81,15 +81,15 @@ average cursor skips: 331.5
 ## Hybrid Retrieval
 
 `hybrid_retrieval.rs` composes sparse search with `vicinity` dense HNSW and
-`rankops` reciprocal-rank fusion. The target document is first in neither
-source ranking but wins because both retrievers rank it highly.
+`rankops` reciprocal-rank fusion. The output reports the two source rankings and
+the fused top document.
 
-Expected excerpt:
+Output:
 
 ```text
-dense top-3:  [0, 2, 9]
-sparse top-3: [1, 2]
-fused top-3:  [2, 1, 0]
+dense top-2:  [0, 2]
+sparse top-2: [1, 2]
+fused rank-1 doc: 2
 ```
 
 ## CCSA Retrieval
@@ -98,12 +98,12 @@ fused top-3:  [2, 1, 0]
 dense vectors into C-hot sparse codes, and indexes those codes with the same
 `SporseIndex` API used by SPLADE-style vectors.
 
-Expected excerpt:
+Output:
 
 ```text
 reconstruction MSE: 0.1933
 top-3 (doc_id, cluster): [(1, 0), (4, 0), (3, 0)]
-  [PASS] CCSA codes index and retrieve, returning a same-cluster document
+top result cluster: 0
 ```
 
 ## Serialization
@@ -112,3 +112,12 @@ top-3 (doc_id, cluster): [(1, 0), (4, 0), (3, 0)]
 search results are identical.
 
 The output reports the serialized index size and the restored query results.
+
+Output:
+
+```text
+serialized index bytes: 559
+query results after round trip:
+  doc 10: 2.800
+  doc 11: 1.600
+```

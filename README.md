@@ -45,14 +45,10 @@ Runnable examples live in [`examples/`](examples/):
 - `serde_roundtrip.rs` verifies built-index serialization with the `serde`
   feature.
 - `hybrid_retrieval.rs` composes this sparse index with vicinity's dense HNSW and
-  rankops reciprocal-rank fusion: a document ranked second by both retrievers (the
-  only one strong on both signals) wins the fused ranking over the documents that
-  top only one. This is the hybrid-search pattern production IR uses to combine
-  lexical and dense signals without training a joint model.
+  rankops reciprocal-rank fusion.
 - `ccsa_retrieval.rs` trains a Composite-Code Sparse Autoencoder (CCSA), encodes
-  documents into C-hot codes, indexes them, and shows a query retrieving
-  same-cluster documents. This is how you make dense embeddings searchable in an
-  inverted index: learn a sparse code instead of running a brute-force dense scan.
+  documents into C-hot codes, indexes them, and reports retrieved cluster
+  labels.
 
 ## CLI
 

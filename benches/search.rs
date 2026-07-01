@@ -190,8 +190,8 @@ fn print_diagnostics(c: &mut Criterion) {
     let avg_iter = total_iterations / n;
     let avg_scored = total_scored / n;
     let avg_skips = total_skips / n;
-    let skip_rate = if total_iterations > 0 {
-        100.0 * total_skips as f64 / total_iterations as f64
+    let advances_per_iter = if total_iterations > 0 {
+        total_skips as f64 / total_iterations as f64
     } else {
         0.0
     };
@@ -211,7 +211,7 @@ fn print_diagnostics(c: &mut Criterion) {
     eprintln!("  iterations:  {avg_iter}");
     eprintln!("  docs scored: {avg_scored} ({scored_frac:.1}% of collection)");
     eprintln!("  cursor skips (advance_to calls): {avg_skips}");
-    eprintln!("  skip-to-score ratio: {skip_rate:.1}% of iterations were skips");
+    eprintln!("  advance_to calls per iteration: {advances_per_iter:.2}");
 
     // Dummy bench so criterion doesn't complain about an unused group
     c.bench_function("diagnostics_noop", |b| b.iter(|| 0u64));

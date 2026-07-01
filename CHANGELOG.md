@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `postings_bridge` example showing how to convert live weighted `postings`
+  entries into `SparseVec` documents without introducing a shared cursor trait.
+
 ## [0.6.5] - 2026-06-30
 
 ### Added

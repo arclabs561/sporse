@@ -37,6 +37,9 @@ let results = index.search(&query, 2);
 Runnable examples live in [`examples/`](examples/):
 
 - `basic.rs` prints score contributions for a small impact-score collection.
+- `postings_bridge.rs` converts live weighted `postings` entries into
+  `SparseVec` documents and checks score parity against direct postings
+  accumulation.
 - `wand_diagnostics.rs` checks exact top-k parity against brute force and reports
   how many documents Block-Max WAND scored.
 - `serde_roundtrip.rs` verifies built-index serialization with the `serde`

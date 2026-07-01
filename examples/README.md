@@ -1,13 +1,18 @@
-# Examples
+# sporse examples
 
 The examples use synthetic impact-score vectors: dimensions are token or latent
 feature ids, weights are non-negative retrieval scores.
 
-| Purpose | Example | Output |
-| --- | --- | --- |
-| See how scores are formed | `basic.rs` | Top results list per-term score contributions. |
-| Check Block-Max WAND pruning | `wand_diagnostics.rs` | WAND top-k matches brute force while scoring a fraction of documents. |
-| Verify serialization | `serde_roundtrip.rs` | Search results are identical after JSON round trip. |
+## Which example should I run?
+
+| I want to... | Example | Run |
+|---|---|---|
+| See how inner-product scores are formed | `basic` | `cargo run --release --example basic` |
+| Convert live weighted postings into sparse vectors | `postings_bridge` | `cargo run --release --example postings_bridge` |
+| Check Block-Max WAND against brute force | `wand_diagnostics` | `cargo run --release --example wand_diagnostics` |
+| Combine sparse and dense retrieval | `hybrid_retrieval` | `cargo run --release --example hybrid_retrieval` |
+| Train sparse codes, then index them | `ccsa_retrieval` | `cargo run --release --example ccsa_retrieval` |
+| Verify built-index serialization | `serde_roundtrip` | `cargo run --release --features serde --example serde_roundtrip` |
 
 ## Score Contributions
 
@@ -34,16 +39,30 @@ query: sparse retrieval with WAND impact scoring
    wand             2.040
 ```
 
+## Postings Bridge
+
+`postings_bridge.rs` adapts a mutable `postings::PostingsIndex<String, f32>`
+into built `sporse::SparseVec` documents by assigning stable term dimensions
+and reconstructing one sparse vector per live document.
+
+The example checks that direct weighted-postings scoring and `sporse` search
+produce the same top-k ranking. The adapter is intentionally local to the
+example; a shared cursor trait still needs two real consumers before becoming
+public API.
+
+Expected excerpt:
+
+```text
+postings top-k: [(2, 8.45), (3, 4.8), (0, 2.6999998)]
+sporse top-k:   [(2, 8.45), (3, 4.8), (0, 2.6999998)]
+```
+
 ## WAND Diagnostics
 
 `wand_diagnostics.rs` builds a larger synthetic index, checks exact top-k
 parity against brute force, and prints how many documents Block-Max WAND fully
 scored. The exact numbers are deterministic because the example uses a fixed
 seed.
-
-```sh
-cargo run --release --example wand_diagnostics
-```
 
 The output reports exact top-k parity against brute force, average WAND loop
 iterations, fully-scored document count, and cursor skips.
@@ -59,13 +78,37 @@ average fully-scored docs: 244.4 (6.11% of collection)
 average cursor skips: 331.5
 ```
 
+## Hybrid Retrieval
+
+`hybrid_retrieval.rs` composes sparse search with `vicinity` dense HNSW and
+`rankops` reciprocal-rank fusion. The target document is first in neither
+source ranking but wins because both retrievers rank it highly.
+
+Expected excerpt:
+
+```text
+dense top-3:  [0, 2, 9]
+sparse top-3: [1, 2]
+fused top-3:  [2, 1, 0]
+```
+
+## CCSA Retrieval
+
+`ccsa_retrieval.rs` trains a small Composite-Code Sparse Autoencoder, converts
+dense vectors into C-hot sparse codes, and indexes those codes with the same
+`SporseIndex` API used by SPLADE-style vectors.
+
+Expected excerpt:
+
+```text
+reconstruction MSE: 0.1933
+top-3 (doc_id, cluster): [(1, 0), (4, 0), (3, 0)]
+  [PASS] CCSA codes index and retrieve, returning a same-cluster document
+```
+
 ## Serialization
 
 `serde_roundtrip.rs` serializes a built index and verifies that deserialized
 search results are identical.
-
-```sh
-cargo run --release --features serde --example serde_roundtrip
-```
 
 The output reports the serialized index size and the restored query results.

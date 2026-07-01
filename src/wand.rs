@@ -207,15 +207,14 @@ fn search_bmw_impl(
                 }
             }
         } else {
-            // Advance the leftmost cursor behind pivot_doc.
-            // Cursors are sorted ascending so cursor[0] is earliest.
+            // In memory-resident indexes, advancing every cursor behind the
+            // pivot usually costs less than another full pivot/sort cycle.
             for cursor in cursors[..pivot_idx].iter_mut() {
                 if cursor.current_doc().is_some_and(|d| d < pivot_doc) {
                     cursor.advance_to(pivot_doc);
                     if collect_stats {
                         stats.cursor_skips += 1;
                     }
-                    break;
                 }
             }
         }

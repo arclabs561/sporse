@@ -14,6 +14,9 @@ All notable changes to this project are documented here. Format based on [Keep a
 - `store::UpdatableIndex` now carries the current global top-k threshold into
   later per-segment WAND searches. Warm cached searches also visit higher-bound
   segments first and skip segments that cannot beat the already-known kth score.
+- Block-Max WAND now advances every cursor behind the pivot on memory-resident
+  postings, reducing repeated pivot/sort cycles without changing exact top-k
+  results.
 
 ## [0.6.5] - 2026-06-30
 

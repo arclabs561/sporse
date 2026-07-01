@@ -8,6 +8,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 - `postings_bridge` example showing how to convert live weighted `postings`
   entries into `SparseVec` documents without introducing a shared cursor trait.
+- `store::UpdatableIndex::reader()` with cloneable checkpoint-visible
+  `UpdatableReader`/`UpdatableView` searches for concurrent read paths.
 
 ### Changed
 

@@ -21,10 +21,10 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use durability::{Directory, PersistenceResult};
-use segstore::{SegmentedStore, Store};
+use segstore::{Reader as SegReader, SegmentedStore, Store, View as SegView};
 
 use crate::{posting::BLOCK_SIZE, SparseVec, SporseIndex};
 
@@ -70,6 +70,16 @@ struct Cache {
     by_ptr: HashMap<usize, Option<SporseIndex>>,
 }
 
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct ReaderCacheKey {
+    ptr: usize,
+    live_ids: Vec<u32>,
+}
+
+struct ReaderCache {
+    by_key: HashMap<ReaderCacheKey, Option<Arc<SporseIndex>>>,
+}
+
 /// The `kind` tag for a persisted per-segment WAND sidecar.
 const INDEX_KIND: &str = "wand";
 const SIDECAR_MAGIC: &[u8; 8] = b"SPORIDX1";
@@ -89,6 +99,31 @@ pub struct UpdatableIndex {
     /// Segment ids whose on-disk WAND sidecar was validated or written in this
     /// process, so checkpoint persistence stays O(new segments).
     persisted: RefCell<HashSet<u64>>,
+}
+
+/// Cloneable handle for checkpoint-visible snapshot searches.
+///
+/// A reader sees the state published by [`UpdatableIndex::checkpoint`] or
+/// compaction. Writes after the last checkpoint remain visible through
+/// [`UpdatableIndex::search`], but become visible to reader views only after the
+/// next checkpoint.
+#[derive(Clone)]
+pub struct UpdatableReader {
+    inner: SegReader<SparseBacking>,
+    dir: Arc<dyn Directory>,
+    sidecar_recipe: Arc<str>,
+    cache: Arc<Mutex<ReaderCache>>,
+}
+
+/// A stable, point-in-time search view from an [`UpdatableReader`].
+///
+/// Holding a view keeps the underlying immutable segments alive while the writer
+/// continues to add, delete, checkpoint, or compact.
+pub struct UpdatableView {
+    inner: SegView<SparseBacking>,
+    dir: Arc<dyn Directory>,
+    sidecar_recipe: Arc<str>,
+    cache: Arc<Mutex<ReaderCache>>,
 }
 
 impl UpdatableIndex {
@@ -176,6 +211,23 @@ impl UpdatableIndex {
     pub fn reclaim(&mut self, min_live_ratio: f64) -> PersistenceResult<()> {
         self.inner.reclaim_tombstones(min_live_ratio)?;
         Ok(())
+    }
+
+    /// Return a cloneable snapshot reader for concurrent searches.
+    ///
+    /// Reader views are checkpoint-visible: call [`Self::checkpoint`] when
+    /// recently added or deleted documents should become visible through the
+    /// reader. Use [`Self::search`] when the single-writer path should include the
+    /// unflushed buffer immediately.
+    pub fn reader(&self) -> UpdatableReader {
+        UpdatableReader {
+            inner: self.inner.reader(),
+            dir: self.inner.dir().clone(),
+            sidecar_recipe: Arc::from(self.sidecar_recipe.as_str()),
+            cache: Arc::new(Mutex::new(ReaderCache {
+                by_key: HashMap::new(),
+            })),
+        }
     }
 
     /// Storage amplification: stored documents divided by live documents (`1.0`
@@ -282,10 +334,17 @@ impl UpdatableIndex {
 
     /// Build a `SporseIndex` over the live documents of `items` (None if empty).
     fn build_live_index(&self, items: &[(u32, SparseVec)]) -> Option<SporseIndex> {
+        Self::build_live_index_from(items, &|id| self.inner.is_live(id))
+    }
+
+    fn build_live_index_from(
+        items: &[(u32, SparseVec)],
+        live: &dyn Fn(&u32) -> bool,
+    ) -> Option<SporseIndex> {
         let mut idx = SporseIndex::new();
         let mut any = false;
         for (id, v) in items {
-            if self.inner.is_live(id) {
+            if live(id) {
                 idx.insert(*id, v);
                 any = true;
             }
@@ -313,23 +372,31 @@ impl UpdatableIndex {
     /// current live ids. A stale sidecar can never serve a tombstoned document.
     fn load_sidecar(&self, seg: &[(u32, SparseVec)], seg_id: u64) -> Option<SporseIndex> {
         let name = self.inner.index_name(seg_id, INDEX_KIND);
-        if !self.inner.dir().exists(&name) {
+        Self::load_sidecar_from(self.inner.dir(), &name, &self.sidecar_recipe, seg, &|id| {
+            self.inner.is_live(id)
+        })
+    }
+
+    fn load_sidecar_from(
+        dir: &Arc<dyn Directory>,
+        name: &str,
+        sidecar_recipe: &str,
+        seg: &[(u32, SparseVec)],
+        live: &dyn Fn(&u32) -> bool,
+    ) -> Option<SporseIndex> {
+        if !dir.exists(name) {
             return None;
         }
         let mut bytes = Vec::new();
-        self.inner
-            .dir()
-            .open_file(&name)
-            .ok()?
-            .read_to_end(&mut bytes)
-            .ok()?;
-        let index_bytes = self.decode_sidecar(&bytes)?;
+        dir.open_file(name).ok()?.read_to_end(&mut bytes).ok()?;
+        let index_bytes = Self::decode_sidecar_for_recipe(sidecar_recipe, &bytes)?;
         let sidecar: SporseSidecar = postcard::from_bytes(index_bytes).ok()?;
         if !sidecar.index.built {
             return None;
         }
-        let live = self.live_ids(seg);
-        if sidecar.ids.len() == live.len() && sidecar.ids.iter().all(|id| live.contains(id)) {
+        let mut sidecar_ids = sidecar.ids;
+        sidecar_ids.sort_unstable();
+        if sidecar_ids == Self::live_ids_vec_from(seg, live) {
             Some(sidecar.index)
         } else {
             None
@@ -358,16 +425,14 @@ impl UpdatableIndex {
         }
     }
 
-    fn live_ids(&self, seg: &[(u32, SparseVec)]) -> HashSet<u32> {
-        seg.iter()
-            .filter_map(|(id, _)| self.inner.is_live(id).then_some(*id))
-            .collect()
+    fn live_ids_vec(&self, seg: &[(u32, SparseVec)]) -> Vec<u32> {
+        Self::live_ids_vec_from(seg, &|id| self.inner.is_live(id))
     }
 
-    fn live_ids_vec(&self, seg: &[(u32, SparseVec)]) -> Vec<u32> {
+    fn live_ids_vec_from(seg: &[(u32, SparseVec)], live: &dyn Fn(&u32) -> bool) -> Vec<u32> {
         let mut ids: Vec<u32> = seg
             .iter()
-            .filter_map(|(id, _)| self.inner.is_live(id).then_some(*id))
+            .filter_map(|(id, _)| live(id).then_some(*id))
             .collect();
         ids.sort_unstable();
         ids
@@ -394,7 +459,12 @@ impl UpdatableIndex {
         Some(bytes)
     }
 
+    #[cfg(test)]
     fn decode_sidecar<'a>(&self, bytes: &'a [u8]) -> Option<&'a [u8]> {
+        Self::decode_sidecar_for_recipe(&self.sidecar_recipe, bytes)
+    }
+
+    fn decode_sidecar_for_recipe<'a>(sidecar_recipe: &str, bytes: &'a [u8]) -> Option<&'a [u8]> {
         if bytes.len() < 16 {
             return None;
         }
@@ -411,10 +481,17 @@ impl UpdatableIndex {
         if bytes.len() < recipe_end {
             return None;
         }
-        if &bytes[recipe_start..recipe_end] != self.sidecar_recipe.as_bytes() {
+        if &bytes[recipe_start..recipe_end] != sidecar_recipe.as_bytes() {
             return None;
         }
         Some(&bytes[recipe_end..])
+    }
+
+    fn reader_sidecar_name(seg_id: u64) -> String {
+        // Matches segstore's documented sidecar path. The writer path still uses
+        // SegmentedStore::index_name; reader views expose stable segment ids but
+        // intentionally do not carry the writer handle.
+        format!("segstore.idx.{seg_id}.{INDEX_KIND}")
     }
 
     /// Persist sidecars for sealed segments that lack a current one. This is
@@ -436,6 +513,101 @@ impl UpdatableIndex {
                 self.persist_sidecar(&idx, &seg[..], seg_id);
             }
         }
+    }
+}
+
+impl UpdatableReader {
+    /// Take a stable search view as of the latest checkpoint-published state.
+    pub fn view(&self) -> UpdatableView {
+        UpdatableView {
+            inner: self.inner.view(),
+            dir: self.dir.clone(),
+            sidecar_recipe: self.sidecar_recipe.clone(),
+            cache: self.cache.clone(),
+        }
+    }
+
+    /// Search the latest checkpoint-published view.
+    pub fn search(&self, query: &SparseVec, k: usize) -> Vec<(u32, f32)> {
+        self.view().search(query, k)
+    }
+}
+
+impl UpdatableView {
+    /// Top-k documents by Block-Max WAND inner product over this snapshot's live
+    /// checkpointed corpus.
+    pub fn search(&self, query: &SparseVec, k: usize) -> Vec<(u32, f32)> {
+        if k == 0 || query.is_empty() {
+            return Vec::new();
+        }
+
+        let segs = self.inner.segments();
+        let ids = self.inner.segment_ids();
+        let live = |id: &u32| self.inner.is_live(id);
+        let segment_keys: Vec<(ReaderCacheKey, usize)> = segs
+            .iter()
+            .enumerate()
+            .map(|(i, seg)| {
+                (
+                    ReaderCacheKey {
+                        ptr: Arc::as_ptr(seg) as usize,
+                        live_ids: UpdatableIndex::live_ids_vec_from(&seg[..], &live),
+                    },
+                    i,
+                )
+            })
+            .collect();
+        let mut indexes = {
+            let mut cache = self.cache.lock().unwrap();
+            let current: HashSet<ReaderCacheKey> =
+                segment_keys.iter().map(|(key, _)| key.clone()).collect();
+            cache.by_key.retain(|key, _| current.contains(key));
+
+            let mut indexes = Vec::with_capacity(segs.len());
+            for (key, i) in segment_keys {
+                let seg_id = ids[i];
+                let seg = &segs[i];
+                let index_key = key.clone();
+                let index = cache.by_key.entry(key).or_insert_with(|| {
+                    let name = UpdatableIndex::reader_sidecar_name(seg_id);
+                    UpdatableIndex::load_sidecar_from(
+                        &self.dir,
+                        &name,
+                        self.sidecar_recipe.as_ref(),
+                        &seg[..],
+                        &live,
+                    )
+                    .or_else(|| UpdatableIndex::build_live_index_from(&seg[..], &live))
+                    .map(|index| {
+                        debug_assert_eq!(
+                            index_key.live_ids,
+                            UpdatableIndex::live_ids_vec_from(&seg[..], &live)
+                        );
+                        Arc::new(index)
+                    })
+                });
+                if let Some(index) = index.as_ref() {
+                    indexes.push((index.clone(), index.query_upper_bound(query)));
+                }
+            }
+            indexes
+        };
+
+        indexes.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+        let mut cand = Vec::new();
+        let mut threshold = 0.0f32;
+        for (index, upper_bound) in indexes {
+            if cand.len() >= k && upper_bound <= threshold {
+                continue;
+            }
+            let results = if cand.len() >= k {
+                index.search_above(query, k, threshold)
+            } else {
+                index.search(query, k)
+            };
+            threshold = UpdatableIndex::merge_top_k(&mut cand, results, k);
+        }
+        cand
     }
 }
 
@@ -532,6 +704,77 @@ mod tests {
         );
         assert!((hits[0].1 - 11.0).abs() < 1e-5);
         assert!((hits[1].1 - 10.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn reader_views_are_checkpoint_visible_and_stable() {
+        let dir = MemoryDirectory::arc();
+        let mut store = UpdatableIndex::open(dir, 2).unwrap();
+        store.add(0, sv(&[(0, 10.0)])).unwrap();
+        store.add(1, sv(&[(0, 9.0)])).unwrap();
+        store.checkpoint().unwrap();
+
+        let reader = store.reader();
+        let held = reader.view();
+        let q = sv(&[(0, 1.0)]);
+        assert_eq!(
+            held.search(&q, 3)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec![0, 1],
+            "held view starts at the checkpointed state"
+        );
+
+        store.delete(0).unwrap();
+        store.add(2, sv(&[(0, 11.0)])).unwrap();
+        store.add(3, sv(&[(0, 1.0)])).unwrap();
+
+        assert_eq!(
+            store
+                .search(&q, 3)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec![2, 1, 3],
+            "writer search sees uncheckpointed deletes and additions"
+        );
+        assert_eq!(
+            held.search(&q, 3)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec![0, 1],
+            "held view remains stable after writer mutations"
+        );
+        assert_eq!(
+            reader
+                .search(&q, 3)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec![0, 1],
+            "fresh reader views remain checkpoint-visible until checkpoint"
+        );
+
+        store.checkpoint().unwrap();
+        assert_eq!(
+            reader
+                .search(&q, 3)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec![2, 1, 3],
+            "fresh views after checkpoint see the new live set"
+        );
+        assert_eq!(
+            held.search(&q, 3)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec![0, 1],
+            "old held view still does not change after checkpoint"
+        );
     }
 
     #[test]

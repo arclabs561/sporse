@@ -4,9 +4,9 @@
 //! harness is an empty no-op so the bench target still compiles.
 //!
 //! Measures the costs that matter for an updatable WAND index: build throughput,
-//! warm query latency (per-segment indexes cached), cold restart latency with
-//! persisted sidecars, and the cold rebuild cost when sidecars are missing or
-//! stale.
+//! warm query latency (per-segment indexes cached), checkpoint-visible reader
+//! query latency, cold restart latency with persisted sidecars, and the cold
+//! rebuild cost when sidecars are missing or stale.
 
 #[cfg(not(feature = "store"))]
 fn main() {}
@@ -94,6 +94,16 @@ fn benches(c: &mut Criterion) {
     let (_, warm, q) = fresh_store(true, true);
     g.bench_function("search_warm", |b| {
         b.iter(|| warm.search(&q, 10));
+    });
+
+    let reader = warm.reader();
+    let held_view = reader.view();
+    let _ = held_view.search(&q, 10); // populate the reader's per-segment cache
+    g.bench_function("reader_search_warm", |b| {
+        b.iter(|| reader.search(&q, 10));
+    });
+    g.bench_function("view_search_warm", |b| {
+        b.iter(|| held_view.search(&q, 10));
     });
 
     g.bench_function("search_cold_load_sidecars", |b| {

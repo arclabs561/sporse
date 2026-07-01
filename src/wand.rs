@@ -97,7 +97,17 @@ pub struct WandStats {
 ///
 /// Assumes non-negative weights. Negative weights may cause missed results.
 pub(crate) fn search_bmw(cursors: &mut Vec<Cursor>, k: usize) -> Vec<(u32, f32)> {
-    search_bmw_impl(cursors, k, false).0
+    search_bmw_impl(cursors, k, false, 0.0, true).0
+}
+
+/// Block-Max WAND search that only returns candidates above `min_score`.
+#[cfg(any(feature = "store", test))]
+pub(crate) fn search_bmw_above(
+    cursors: &mut Vec<Cursor>,
+    k: usize,
+    min_score: f32,
+) -> Vec<(u32, f32)> {
+    search_bmw_impl(cursors, k, false, min_score, false).0
 }
 
 /// Block-Max WAND search with per-query statistics. Used for profiling/diagnosis.
@@ -105,16 +115,18 @@ pub(crate) fn search_bmw_with_stats(
     cursors: &mut Vec<Cursor>,
     k: usize,
 ) -> (Vec<(u32, f32)>, WandStats) {
-    search_bmw_impl(cursors, k, true)
+    search_bmw_impl(cursors, k, true, 0.0, true)
 }
 
 fn search_bmw_impl(
     cursors: &mut Vec<Cursor>,
     k: usize,
     collect_stats: bool,
+    initial_threshold: f32,
+    fill_heap: bool,
 ) -> (Vec<(u32, f32)>, WandStats) {
     let mut heap: BinaryHeap<Reverse<(OrdF32, u32)>> = BinaryHeap::with_capacity(k + 1);
-    let mut threshold = 0.0f32;
+    let mut threshold = initial_threshold.max(0.0);
     let mut stats = WandStats::default();
 
     // Pre-sort cursors by max_score descending so the pivot accumulation loop
@@ -149,7 +161,7 @@ fn search_bmw_impl(
         let mut pivot_idx = None;
         for (i, cursor) in cursors.iter().enumerate() {
             acc += cursor.upper_bound();
-            if acc > threshold || heap.len() < k {
+            if acc > threshold || (fill_heap && heap.len() < k) {
                 pivot_idx = Some(i);
                 break;
             }
@@ -185,7 +197,7 @@ fn search_bmw_impl(
                 stats.docs_scored += 1;
             }
 
-            if heap.len() < k || score > threshold {
+            if score > threshold || (fill_heap && heap.len() < k) {
                 heap.push(Reverse((OrdF32(score), pivot_doc)));
                 if heap.len() > k {
                     heap.pop();

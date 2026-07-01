@@ -186,7 +186,12 @@ impl UpdatableIndex {
 
     /// Top-k documents by Block-Max WAND inner product over the live corpus.
     pub fn search(&self, query: &SparseVec, k: usize) -> Vec<(u32, f32)> {
+        if k == 0 || query.is_empty() {
+            return Vec::new();
+        }
+
         let mut cand: Vec<(u32, f32)> = Vec::new();
+        let mut threshold = 0.0f32;
         {
             let segs = self.inner.segments();
             let mut cache = self.cache.borrow_mut();
@@ -194,6 +199,9 @@ impl UpdatableIndex {
             let current: std::collections::HashSet<usize> =
                 segs.iter().map(|a| Arc::as_ptr(a) as usize).collect();
             cache.by_ptr.retain(|key, _| current.contains(key));
+            let all_cached = segs
+                .iter()
+                .all(|seg| cache.by_ptr.contains_key(&(Arc::as_ptr(seg) as usize)));
             // Build only segments not already cached, loading a persisted sidecar
             // first when one matches the current recipe and live id set.
             let ids = self.inner.segment_ids();
@@ -205,18 +213,71 @@ impl UpdatableIndex {
                     .entry(key)
                     .or_insert_with(|| self.build_or_load(&seg[..], seg_id));
             }
-            for idx in cache.by_ptr.values().flatten() {
-                cand.extend(idx.search(query, k));
+
+            if all_cached {
+                let mut order: Vec<(usize, f32)> = segs
+                    .iter()
+                    .filter_map(|seg| {
+                        let key = Arc::as_ptr(seg) as usize;
+                        cache
+                            .by_ptr
+                            .get(&key)
+                            .and_then(|idx| idx.as_ref())
+                            .map(|idx| (key, idx.query_upper_bound(query)))
+                    })
+                    .collect();
+                order.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+                for (key, upper_bound) in order {
+                    if cand.len() >= k && upper_bound <= threshold {
+                        continue;
+                    }
+                    if let Some(idx) = cache.by_ptr.get(&key).and_then(|idx| idx.as_ref()) {
+                        let results = if cand.len() >= k {
+                            idx.search_above(query, k, threshold)
+                        } else {
+                            idx.search(query, k)
+                        };
+                        threshold = Self::merge_top_k(&mut cand, results, k);
+                    }
+                }
+            } else {
+                for seg in segs {
+                    let key = Arc::as_ptr(seg) as usize;
+                    if let Some(idx) = cache.by_ptr.get(&key).and_then(|idx| idx.as_ref()) {
+                        let results = if cand.len() >= k {
+                            idx.search_above(query, k, threshold)
+                        } else {
+                            idx.search(query, k)
+                        };
+                        threshold = Self::merge_top_k(&mut cand, results, k);
+                    }
+                }
             }
         }
         // The unflushed buffer is bounded by the flush threshold; build it fresh.
         let buffered: Vec<(u32, SparseVec)> = self.inner.buffer().to_vec();
         if let Some(idx) = self.build_live_index(&buffered) {
-            cand.extend(idx.search(query, k));
+            if cand.len() < k || idx.query_upper_bound(query) > threshold {
+                let results = if cand.len() >= k {
+                    idx.search_above(query, k, threshold)
+                } else {
+                    idx.search(query, k)
+                };
+                Self::merge_top_k(&mut cand, results, k);
+            }
         }
-        cand.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
-        cand.truncate(k);
         cand
+    }
+
+    fn merge_top_k(cand: &mut Vec<(u32, f32)>, mut results: Vec<(u32, f32)>, k: usize) -> f32 {
+        cand.append(&mut results);
+        if cand.len() >= k {
+            cand.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+            cand.truncate(k);
+            cand.last().map_or(0.0, |(_, score)| *score)
+        } else {
+            0.0
+        }
     }
 
     /// Build a `SporseIndex` over the live documents of `items` (None if empty).
@@ -451,6 +512,26 @@ mod tests {
         let q = SparseVec::new(vec![(0, 1.0), (3, 1.0)]);
         let top: Vec<u32> = store.search(&q, 3).into_iter().map(|(id, _)| id).collect();
         assert_eq!(top, vec![1, 2], "recovery preserves results");
+    }
+
+    #[test]
+    fn search_threshold_keeps_later_segment_winners() {
+        let dir = MemoryDirectory::arc();
+        let mut store = UpdatableIndex::open(dir, 2).unwrap();
+        store.add(0, sv(&[(0, 10.0)])).unwrap();
+        store.add(1, sv(&[(0, 9.0)])).unwrap();
+        store.add(2, sv(&[(0, 11.0)])).unwrap();
+        store.add(3, sv(&[(0, 1.0)])).unwrap();
+
+        let q = sv(&[(0, 1.0)]);
+        let hits = store.search(&q, 2);
+
+        assert_eq!(
+            hits.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![2, 0]
+        );
+        assert!((hits[0].1 - 11.0).abs() < 1e-5);
+        assert!((hits[1].1 - 10.0).abs() < 1e-5);
     }
 
     #[test]

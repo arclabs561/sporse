@@ -9,6 +9,12 @@ All notable changes to this project are documented here. Format based on [Keep a
 - `postings_bridge` example showing how to convert live weighted `postings`
   entries into `SparseVec` documents without introducing a shared cursor trait.
 
+### Changed
+
+- `store::UpdatableIndex` now carries the current global top-k threshold into
+  later per-segment WAND searches. Warm cached searches also visit higher-bound
+  segments first and skip segments that cannot beat the already-known kth score.
+
 ## [0.6.5] - 2026-06-30
 
 ### Added

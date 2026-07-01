@@ -178,18 +178,46 @@ impl SporseIndex {
             return Vec::new();
         }
 
-        let mut cursors: Vec<wand::Cursor> = Vec::new();
-        for &(dim, query_weight) in query.pairs() {
-            if let Some(list) = self.postings.get(&dim) {
-                cursors.push(wand::Cursor::new(list, query_weight));
-            }
-        }
-
+        let mut cursors = self.cursors_for(query);
         if cursors.is_empty() {
             return Vec::new();
         }
 
         wand::search_bmw(&mut cursors, k)
+    }
+
+    #[cfg(any(feature = "store", test))]
+    pub(crate) fn search_above(
+        &self,
+        query: &SparseVec,
+        k: usize,
+        min_score: f32,
+    ) -> Vec<(u32, f32)> {
+        assert!(self.built, "must call build() before search()");
+        if k == 0 || query.is_empty() {
+            return Vec::new();
+        }
+
+        let mut cursors = self.cursors_for(query);
+        if cursors.is_empty() {
+            return Vec::new();
+        }
+
+        wand::search_bmw_above(&mut cursors, k, min_score)
+    }
+
+    #[cfg(any(feature = "store", test))]
+    pub(crate) fn query_upper_bound(&self, query: &SparseVec) -> f32 {
+        assert!(self.built, "must call build() before search()");
+        query
+            .pairs()
+            .iter()
+            .filter_map(|(dim, query_weight)| {
+                self.postings
+                    .get(dim)
+                    .map(|list| list.max_weight * *query_weight)
+            })
+            .sum()
     }
 
     /// Search with per-query WAND statistics. For profiling and diagnostics.
@@ -206,16 +234,21 @@ impl SporseIndex {
         if k == 0 || query.is_empty() {
             return (Vec::new(), wand::WandStats::default());
         }
-        let mut cursors: Vec<wand::Cursor> = Vec::new();
+        let mut cursors = self.cursors_for(query);
+        if cursors.is_empty() {
+            return (Vec::new(), wand::WandStats::default());
+        }
+        wand::search_bmw_with_stats(&mut cursors, k)
+    }
+
+    fn cursors_for(&self, query: &SparseVec) -> Vec<wand::Cursor<'_>> {
+        let mut cursors = Vec::new();
         for &(dim, query_weight) in query.pairs() {
             if let Some(list) = self.postings.get(&dim) {
                 cursors.push(wand::Cursor::new(list, query_weight));
             }
         }
-        if cursors.is_empty() {
-            return (Vec::new(), wand::WandStats::default());
-        }
-        wand::search_bmw_with_stats(&mut cursors, k)
+        cursors
     }
 
     /// Number of documents inserted.
@@ -403,6 +436,37 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, 1);
         assert_eq!(results[1].0, 0);
+    }
+
+    #[test]
+    fn thresholded_search_does_not_fill_below_threshold() {
+        let mut index = SporseIndex::new();
+        for i in 0..6u32 {
+            index.insert(i, &SparseVec::new(vec![(0, i as f32 + 1.0)]));
+        }
+        index.build();
+
+        let query = SparseVec::new(vec![(0, 1.0)]);
+        let results = index.search_above(&query, 10, 4.0);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![5, 4]
+        );
+        assert!(results.iter().all(|(_, score)| *score > 4.0));
+    }
+
+    #[test]
+    fn query_upper_bound_sums_matching_term_maxima() {
+        let mut index = SporseIndex::new();
+        index.insert(0, &SparseVec::new(vec![(0, 2.0), (1, 3.0)]));
+        index.insert(1, &SparseVec::new(vec![(0, 5.0), (2, 7.0)]));
+        index.build();
+
+        let query = SparseVec::new(vec![(0, 2.0), (1, 4.0), (99, 100.0)]);
+
+        assert!((index.query_upper_bound(&query) - 22.0).abs() < 1e-5);
     }
 
     #[test]

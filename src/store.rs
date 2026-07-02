@@ -188,6 +188,7 @@ impl UpdatableIndex {
     /// Merge segments (dropping tombstoned docs) and persist a checkpoint.
     pub fn compact(&mut self) -> PersistenceResult<()> {
         self.inner.compact()?;
+        self.persist_new_segments();
         Ok(())
     }
 
@@ -201,7 +202,10 @@ impl UpdatableIndex {
     /// Run one round of size-tiered compaction, merging similarly-sized segments
     /// so the segment count stays bounded without a full [`compact`](Self::compact).
     pub fn compact_tiers(&mut self) -> PersistenceResult<()> {
-        self.inner.compact_tiers()?;
+        let stats = self.inner.compact_tiers()?;
+        if stats.merges > 0 {
+            self.persist_new_segments();
+        }
         Ok(())
     }
 
@@ -209,7 +213,10 @@ impl UpdatableIndex {
     /// reclaiming tombstoned documents -- the cheap alternative to a full
     /// [`compact`](Self::compact) when a few segments are delete-heavy.
     pub fn reclaim(&mut self, min_live_ratio: f64) -> PersistenceResult<()> {
-        self.inner.reclaim_tombstones(min_live_ratio)?;
+        let stats = self.inner.reclaim_tombstones(min_live_ratio)?;
+        if stats.merges > 0 {
+            self.persist_new_segments();
+        }
         Ok(())
     }
 
@@ -844,6 +851,48 @@ mod tests {
         assert!(
             !top.contains(&0) && top.contains(&1),
             "delete correct: {top:?}"
+        );
+    }
+
+    #[test]
+    fn compact_persists_sidecar_for_merged_segment() {
+        let dir = MemoryDirectory::arc();
+        let mut store = UpdatableIndex::open(dir, 2).unwrap();
+        store.add(0, sv(&[(0, 3.0), (3, 1.0)])).unwrap();
+        store.add(1, sv(&[(0, 2.0), (4, 1.0)])).unwrap();
+        store.add(2, sv(&[(1, 4.0)])).unwrap();
+        store.add(3, sv(&[(0, 1.0), (1, 1.0)])).unwrap();
+
+        let before_ids = store.inner.segment_ids().to_vec();
+        assert!(
+            before_ids.len() >= 2,
+            "test setup should create multiple sealed segments"
+        );
+        let q = sv(&[(0, 1.0)]);
+
+        store.compact().unwrap();
+
+        let after_ids = store.inner.segment_ids().to_vec();
+        assert_eq!(
+            after_ids.len(),
+            1,
+            "compact should merge the sealed segments"
+        );
+        assert!(
+            store
+                .inner
+                .dir()
+                .exists(&store.inner.index_name(after_ids[0], INDEX_KIND)),
+            "merged segment should have a sidecar immediately after compact"
+        );
+        assert_eq!(
+            store
+                .search(&q, 3)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 3],
+            "compaction should preserve WAND results"
         );
     }
 

@@ -27,6 +27,12 @@ All notable changes to this project are documented here. Format based on [Keep a
   postings, reducing repeated pivot/sort cycles without changing exact top-k
   results.
 
+### Fixed
+
+- `store::UpdatableIndex::{compact, compact_tiers, reclaim}` now persist sidecars
+  for newly merged segments immediately after segstore checkpoints them, instead
+  of waiting for the next search to rebuild and write the sidecar lazily.
+
 ## [0.6.5] - 2026-06-30
 
 ### Added

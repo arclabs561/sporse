@@ -95,7 +95,8 @@ pub struct WandStats {
 
 /// Block-Max WAND search. Returns `(doc_id, score)` in descending score order.
 ///
-/// Assumes non-negative weights. Negative weights may cause missed results.
+/// Assumes finite non-negative weights. Callers fall back to exact scoring when
+/// the index or query violates that precondition.
 pub(crate) fn search_bmw(cursors: &mut Vec<Cursor>, k: usize) -> Vec<(u32, f32)> {
     search_bmw_impl(cursors, k, false, 0.0, true).0
 }

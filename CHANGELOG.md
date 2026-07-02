@@ -13,6 +13,10 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ### Changed
 
+- `SporseIndex::search` now falls back to exact sparse accumulation when either
+  indexed vectors or query vectors contain negative or non-finite weights.
+  Block-Max WAND remains the hot path for finite non-negative learned-sparse
+  vectors, but the public API no longer silently relies on that precondition.
 - Block-Max WAND now uses 32-doc blocks, tightening per-block upper bounds for
   SPLADE-style sparse search. Existing `store` sidecars rebuild once because the
   block size is part of the persisted sidecar recipe.

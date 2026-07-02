@@ -43,7 +43,8 @@ use std::collections::HashMap;
 /// A sparse vector: sorted list of (dimension, weight) pairs.
 ///
 /// Dimensions are sorted ascending. Zero-weight entries are removed
-/// on construction. Weights should be non-negative for correct WAND search.
+/// on construction. Finite non-negative weights use Block-Max WAND search;
+/// negative or non-finite weights fall back to exact sparse accumulation.
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SparseVec {
@@ -81,6 +82,13 @@ impl SparseVec {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.pairs.is_empty()
+    }
+
+    #[inline]
+    fn wand_safe(&self) -> bool {
+        self.pairs
+            .iter()
+            .all(|&(_, weight)| weight.is_finite() && weight >= 0.0)
     }
 
     /// Inner product with another sparse vector.
@@ -126,7 +134,14 @@ impl From<Vec<(u32, f32)>> for SparseVec {
 pub struct SporseIndex {
     postings: HashMap<u32, posting::PostingList>,
     num_docs: u32,
+    #[cfg_attr(feature = "serde", serde(default = "default_wand_safe"))]
+    wand_safe: bool,
     built: bool,
+}
+
+#[cfg(feature = "serde")]
+fn default_wand_safe() -> bool {
+    false
 }
 
 impl SporseIndex {
@@ -135,6 +150,7 @@ impl SporseIndex {
         Self {
             postings: HashMap::new(),
             num_docs: 0,
+            wand_safe: true,
             built: false,
         }
     }
@@ -147,6 +163,7 @@ impl SporseIndex {
     /// Panics if called after [`build`](SporseIndex::build).
     pub fn insert(&mut self, doc_id: u32, vec: &SparseVec) {
         assert!(!self.built, "cannot insert after build");
+        self.wand_safe &= vec.wand_safe();
         for &(dim, weight) in vec.pairs() {
             self.postings
                 .entry(dim)
@@ -177,6 +194,9 @@ impl SporseIndex {
         if k == 0 || query.is_empty() {
             return Vec::new();
         }
+        if !self.can_use_wand(query) {
+            return self.search_exact_above(query, k, 0.0);
+        }
 
         let mut cursors = self.cursors_for(query);
         if cursors.is_empty() {
@@ -197,6 +217,9 @@ impl SporseIndex {
         if k == 0 || query.is_empty() {
             return Vec::new();
         }
+        if !self.can_use_wand(query) {
+            return self.search_exact_above(query, k, min_score);
+        }
 
         let mut cursors = self.cursors_for(query);
         if cursors.is_empty() {
@@ -209,6 +232,9 @@ impl SporseIndex {
     #[cfg(any(feature = "store", test))]
     pub(crate) fn query_upper_bound(&self, query: &SparseVec) -> f32 {
         assert!(self.built, "must call build() before search()");
+        if !self.can_use_wand(query) {
+            return f32::INFINITY;
+        }
         query
             .pairs()
             .iter()
@@ -234,6 +260,12 @@ impl SporseIndex {
         if k == 0 || query.is_empty() {
             return (Vec::new(), wand::WandStats::default());
         }
+        if !self.can_use_wand(query) {
+            return (
+                self.search_exact_above(query, k, 0.0),
+                wand::WandStats::default(),
+            );
+        }
         let mut cursors = self.cursors_for(query);
         if cursors.is_empty() {
             return (Vec::new(), wand::WandStats::default());
@@ -249,6 +281,38 @@ impl SporseIndex {
             }
         }
         cursors
+    }
+
+    #[inline]
+    fn can_use_wand(&self, query: &SparseVec) -> bool {
+        self.wand_safe && query.wand_safe()
+    }
+
+    fn search_exact_above(&self, query: &SparseVec, k: usize, min_score: f32) -> Vec<(u32, f32)> {
+        if k == 0 || query.is_empty() {
+            return Vec::new();
+        }
+
+        let mut scores: HashMap<u32, f32> = HashMap::new();
+        for &(dim, query_weight) in query.pairs() {
+            let Some(list) = self.postings.get(&dim) else {
+                continue;
+            };
+            for entry in list.entries() {
+                let contribution = entry.weight * query_weight;
+                if contribution != 0.0 {
+                    *scores.entry(entry.doc_id).or_insert(0.0) += contribution;
+                }
+            }
+        }
+
+        let mut ranked: Vec<_> = scores
+            .into_iter()
+            .filter(|&(_, score)| score.is_finite() && score > min_score)
+            .collect();
+        ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        ranked.truncate(k);
+        ranked
     }
 
     /// Number of documents inserted.
@@ -373,6 +437,45 @@ mod tests {
         assert!((results[0].1 - 7.0).abs() < 1e-5);
         assert_eq!(results[1].0, 1);
         assert!((results[1].1 - 6.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn search_falls_back_to_exact_for_negative_query_weights() {
+        let mut index = SporseIndex::new();
+        index.insert(0, &SparseVec::new(vec![(0, 10.0), (1, 1.0)]));
+        index.insert(1, &SparseVec::new(vec![(1, 1.0)]));
+        index.build();
+
+        let query = SparseVec::new(vec![(0, -1.0), (1, 20.0)]);
+        let results = index.search(&query, 10);
+
+        assert_eq!(results, vec![(1, 20.0), (0, 10.0)]);
+    }
+
+    #[test]
+    fn search_falls_back_to_exact_for_negative_document_weights() {
+        let mut index = SporseIndex::new();
+        index.insert(0, &SparseVec::new(vec![(0, -10.0), (1, 10.0)]));
+        index.insert(1, &SparseVec::new(vec![(1, 1.0)]));
+        index.build();
+
+        let query = SparseVec::new(vec![(0, 1.0), (1, 1.0)]);
+        let results = index.search(&query, 10);
+
+        assert_eq!(results, vec![(1, 1.0)]);
+    }
+
+    #[test]
+    fn thresholded_search_falls_back_to_exact_for_negative_weights() {
+        let mut index = SporseIndex::new();
+        index.insert(0, &SparseVec::new(vec![(0, 10.0), (1, 1.0)]));
+        index.insert(1, &SparseVec::new(vec![(1, 1.0)]));
+        index.build();
+
+        let query = SparseVec::new(vec![(0, -1.0), (1, 20.0)]);
+        let results = index.search_above(&query, 10, 15.0);
+
+        assert_eq!(results, vec![(1, 20.0)]);
     }
 
     #[test]

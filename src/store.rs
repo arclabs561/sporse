@@ -442,7 +442,7 @@ impl UpdatableIndex {
         format!(
             "sporse-store-wand-v1;\
              codec=postcard-sporse-index-v1;\
-             block_size={};score=inner-product-f32;weights=nonnegative",
+             block_size={};score=inner-product-f32;wand=nonnegative-or-exact-fallback",
             BLOCK_SIZE
         )
     }

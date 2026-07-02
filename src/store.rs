@@ -325,6 +325,9 @@ impl UpdatableIndex {
                 Self::merge_top_k(&mut cand, results, k);
             }
         }
+        // merge_top_k sorts only once k candidates have accumulated; with
+        // fewer than k total matches cand is still in segment order.
+        cand.sort_by(|a, b| b.1.total_cmp(&a.1));
         cand
     }
 

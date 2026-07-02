@@ -1,4 +1,4 @@
-pub(crate) const BLOCK_SIZE: usize = 128;
+pub(crate) const BLOCK_SIZE: usize = 32;
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

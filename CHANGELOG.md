@@ -13,6 +13,9 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ### Changed
 
+- Block-Max WAND now uses 32-doc blocks, tightening per-block upper bounds for
+  SPLADE-style sparse search. Existing `store` sidecars rebuild once because the
+  block size is part of the persisted sidecar recipe.
 - `store::UpdatableIndex` now carries the current global top-k threshold into
   later per-segment WAND searches. Warm cached searches also visit higher-bound
   segments first and skip segments that cannot beat the already-known kth score.

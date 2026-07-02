@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn many_documents_block_boundary() {
-        // Test with enough docs to span multiple blocks (BLOCK_SIZE = 128).
+        // Test with enough docs to span multiple block-max blocks.
         let mut index = SporseIndex::new();
         for i in 0..500u32 {
             index.insert(i, &SparseVec::new(vec![(0, i as f32 + 1.0)]));

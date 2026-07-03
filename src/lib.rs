@@ -719,6 +719,131 @@ mod tests {
     }
 
     #[test]
+    fn bmw_scores_high_weight_entry_in_a_later_block() {
+        // Regression: pivot selection must use GLOBAL term maxima, not the
+        // current block's max. With current-block bounds, dim 0's block 0
+        // (maxes at 1.0) hides the 100.0 entry in block 1: the pivot lands on
+        // the dim-1 cursor at doc 500 and advance_to(500) skips doc 40
+        // permanently, returning [(500, 2.0)] instead of [(40, 100.0)].
+        let mut index = SporseIndex::new();
+        // Block 0 of dim 0: docs 0..32, weight 1.0.
+        for i in 0..32u32 {
+            index.insert(i, &SparseVec::new(vec![(0, 1.0)]));
+        }
+        // Block 1 of dim 0 holds the true winner.
+        index.insert(40, &SparseVec::new(vec![(0, 100.0)]));
+        // Shared tail doc so the dim-1 cursor offers a plausible pivot.
+        index.insert(500, &SparseVec::new(vec![(0, 1.0), (1, 1.0)]));
+        index.build();
+
+        let query = SparseVec::new(vec![(0, 1.0), (1, 1.0)]);
+        let results = index.search(&query, 1);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 40, "true top-1 lives in a later block");
+        assert!((results[0].1 - 100.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn randomized_brute_force_parity_multiblock() {
+        // Same parity property as randomized_brute_force_parity, but with
+        // dense posting lists spanning many BLOCK_SIZE blocks and occasional
+        // large weight spikes, so block-max pruning and cross-block skips are
+        // actually exercised. Guards the WAND exactness claim in the regime
+        // real learned-sparse corpora occupy (long, skewed lists).
+        let mut rng: u64 = 987654321;
+        let lcg = |state: &mut u64| -> u64 {
+            *state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *state
+        };
+        let unit = |state: &mut u64| -> f32 { (lcg(state) >> 33) as f32 / (1u64 << 31) as f32 };
+
+        let n = 400u32;
+        let max_dim = 6u32;
+
+        let docs: Vec<SparseVec> = (0..n)
+            .map(|i| {
+                let mut pairs: Vec<(u32, f32)> = Vec::new();
+                for dim in 0..max_dim {
+                    // Dim 5 is rare: a sparse cursor whose next doc sits far
+                    // ahead, pulling the pivot past dense lists' early blocks.
+                    if dim == 5 && i % 89 != 0 {
+                        continue;
+                    }
+                    if dim < 5 && lcg(&mut rng) % 4 == 0 {
+                        continue; // drop ~25% of dims
+                    }
+                    let mut weight = unit(&mut rng) + 0.01;
+                    // Spikes cluster in LATE blocks so early block maxima
+                    // understate the tail — the regime where a current-block
+                    // pivot bound (instead of the global max) loses winners.
+                    if i >= 300 && lcg(&mut rng) % 8 == 0 {
+                        weight *= 50.0;
+                    }
+                    pairs.push((dim, weight));
+                }
+                SparseVec::new(pairs)
+            })
+            .collect();
+
+        let mut index = SporseIndex::new();
+        for (i, doc) in docs.iter().enumerate() {
+            index.insert(i as u32, doc);
+        }
+        index.build();
+
+        for _ in 0..20 {
+            let mut query_pairs: Vec<(u32, f32)> = Vec::new();
+            for dim in 0..max_dim {
+                if lcg(&mut rng) % 2 == 0 {
+                    query_pairs.push((dim, unit(&mut rng) + 0.01));
+                }
+            }
+            if query_pairs.is_empty() {
+                continue;
+            }
+            let query = SparseVec::new(query_pairs);
+
+            for k in [1usize, 5, 20] {
+                let wand_results = index.search(&query, k);
+
+                let mut bf_scores: Vec<(u32, f32)> = docs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, doc)| (i as u32, query.dot(doc)))
+                    .filter(|&(_, s)| s > 0.0)
+                    .collect();
+                bf_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
+                bf_scores.truncate(k);
+
+                assert_eq!(
+                    wand_results.len(),
+                    bf_scores.len(),
+                    "result count mismatch at k={k}: wand={} bf={}",
+                    wand_results.len(),
+                    bf_scores.len()
+                );
+                for (wand, bf) in wand_results.iter().zip(bf_scores.iter()) {
+                    assert_eq!(
+                        wand.0, bf.0,
+                        "doc_id mismatch at k={k}: wand={} bf={}",
+                        wand.0, bf.0
+                    );
+                    assert!(
+                        (wand.1 - bf.1).abs() < 1e-3,
+                        "score mismatch at k={k} for doc {}: wand={} bf={}",
+                        wand.0,
+                        wand.1,
+                        bf.1
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     #[cfg(feature = "serde")]
     fn serde_index_round_trip() {
         let mut index = SporseIndex::new();

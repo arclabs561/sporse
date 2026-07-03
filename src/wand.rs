@@ -51,9 +51,13 @@ impl<'a> Cursor<'a> {
         self.list.entries().get(self.pos).map_or(0.0, |e| e.weight)
     }
 
-    /// Upper bound contribution: block-max weight * query weight.
+    /// Upper bound on this cursor's contribution to the doc at its CURRENT
+    /// position: block-max weight * query weight. Only valid for docs inside
+    /// the cursor's current block — never use it to bound docs a skip could
+    /// reach, because `advance_to` crosses block boundaries. Pivot selection
+    /// must use `max_score` (the global bound) instead.
     #[inline]
-    fn upper_bound(&self) -> f32 {
+    fn current_block_bound(&self) -> f32 {
         self.list.block_max(self.pos / BLOCK_SIZE) * self.query_weight
     }
 
@@ -94,6 +98,11 @@ pub struct WandStats {
 // ── Block-Max WAND ───────────────────────────────────────────────────────────
 
 /// Block-Max WAND search. Returns `(doc_id, score)` in descending score order.
+///
+/// Pivot selection uses global per-term maxima (classic WAND), which keeps
+/// skipping sound across block boundaries; per-block maxima are applied only
+/// as a scoring-time refinement on the pivot document itself. Exact: returns
+/// the same top-k as exhaustive scoring for finite non-negative weights.
 ///
 /// Assumes finite non-negative weights. Callers fall back to exact scoring when
 /// the index or query violates that precondition.
@@ -157,11 +166,18 @@ fn search_bmw_impl(
         // Sort by current doc_id ascending for WAND pivot selection.
         cursors.sort_unstable_by_key(|c| c.current_doc().unwrap_or(u32::MAX));
 
-        // Find pivot: accumulate upper bounds left-to-right until we exceed threshold.
+        // Find pivot: accumulate GLOBAL per-term upper bounds left-to-right
+        // until we exceed threshold. The global max_score is the only bound
+        // valid here: any doc before pivot_doc draws its score solely from
+        // cursors left of the pivot, whose global maxima sum to <= threshold,
+        // so skipping straight to pivot_doc cannot drop a competitive doc.
+        // (Using the current block's max here is unsound: the skip below
+        // crosses block boundaries, and a later block may hold a larger
+        // weight than the current one.)
         let mut acc = 0.0f32;
         let mut pivot_idx = None;
         for (i, cursor) in cursors.iter().enumerate() {
-            acc += cursor.upper_bound();
+            acc += cursor.max_score;
             if acc > threshold || (fill_heap && heap.len() < k) {
                 pivot_idx = Some(i);
                 break;
@@ -184,6 +200,32 @@ fn search_bmw_impl(
             .all(|c| c.current_doc() == Some(pivot_doc));
 
         if all_at_pivot {
+            // Block-max refinement: bound pivot_doc's score by the maxima of
+            // the blocks that actually CONTAIN it. Every cursor sitting at
+            // pivot_doc has it inside its current block, so current_block_bound
+            // is valid for this doc (and only this doc); cursors positioned
+            // past pivot_doc contribute nothing. If even the refined bound
+            // cannot beat the threshold, skip the full scoring pass.
+            let must_fill = fill_heap && heap.len() < k;
+            if !must_fill {
+                let refined: f32 = cursors
+                    .iter()
+                    .filter(|c| c.current_doc() == Some(pivot_doc))
+                    .map(|c| c.current_block_bound())
+                    .sum();
+                if refined <= threshold {
+                    for cursor in cursors.iter_mut() {
+                        if cursor.current_doc() == Some(pivot_doc) {
+                            cursor.advance();
+                            if collect_stats {
+                                stats.cursor_skips += 1;
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+
             // Score pivot_doc across ALL cursors, advancing those at pivot_doc
             // in a single pass (avoids a second scan).
             let mut score = 0.0f32;

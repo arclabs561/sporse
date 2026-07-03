@@ -56,7 +56,7 @@ fn gen_sparse(state: &mut u64, vocab: u32, nnz: usize) -> SparseVec {
             (dim, w)
         })
         .collect();
-    // SparseVec::new deduplicates — actual nnz may be slightly < requested
+    // SparseVec::new folds duplicate dims, so actual nnz may be slightly < requested.
     SparseVec::new(pairs)
 }
 

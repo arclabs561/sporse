@@ -22,6 +22,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ### Changed
 
+- Changed `SparseVec::new` to sum duplicate dimensions deterministically instead
+  of keeping one duplicate after sorting.
 - Changed store search to skip finite zero-bound segment and buffer indexes
   before calling per-segment WAND.
 

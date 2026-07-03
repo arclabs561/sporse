@@ -52,13 +52,25 @@ pub struct SparseVec {
 }
 
 impl SparseVec {
-    /// Create from unsorted pairs. Sorts by dimension, deduplicates,
-    /// and removes zero-weight entries.
+    /// Create from unsorted pairs. Sorts by dimension, sums duplicate
+    /// dimensions, and removes zero-weight entries.
     pub fn new(mut pairs: Vec<(u32, f32)>) -> Self {
         pairs.sort_unstable_by_key(|&(d, _)| d);
-        pairs.dedup_by_key(|p| p.0);
-        pairs.retain(|&(_, w)| w != 0.0);
-        Self { pairs }
+        let mut folded = Vec::with_capacity(pairs.len());
+        for (dim, weight) in pairs {
+            if weight == 0.0 {
+                continue;
+            }
+            if let Some((last_dim, last_weight)) = folded.last_mut() {
+                if *last_dim == dim {
+                    *last_weight += weight;
+                    continue;
+                }
+            }
+            folded.push((dim, weight));
+        }
+        folded.retain(|&(_, weight)| weight != 0.0);
+        Self { pairs: folded }
     }
 
     /// Create from pre-sorted, deduplicated pairs without validation.
@@ -479,13 +491,17 @@ mod tests {
     }
 
     #[test]
-    fn sparse_vec_sorts_and_deduplicates() {
-        let sv = SparseVec::new(vec![(5, 1.0), (2, 0.0), (3, 2.0), (5, 3.0), (1, 1.0)]);
-        // Sorted, deduplicated, zeros removed: dims 1, 3, 5
-        assert_eq!(sv.nnz(), 3);
-        assert_eq!(sv.pairs()[0].0, 1);
-        assert_eq!(sv.pairs()[1].0, 3);
-        assert_eq!(sv.pairs()[2].0, 5);
+    fn sparse_vec_sorts_folds_duplicates_and_removes_zeros() {
+        let sv = SparseVec::new(vec![
+            (5, 1.0),
+            (2, 0.0),
+            (3, 2.0),
+            (5, 3.0),
+            (1, 1.0),
+            (3, -2.0),
+        ]);
+
+        assert_eq!(sv.pairs(), &[(1, 1.0), (5, 4.0)]);
     }
 
     #[test]

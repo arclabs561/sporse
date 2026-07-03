@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCALE: f32 = 100.0;
+const QUERY_SEED: u64 = 0x5eed_ba5e_1234_9876;
 
 #[test]
 fn quantized_raw_impacts_match_sporse_ranking_for_fixed_point_weights() {
@@ -61,11 +62,199 @@ fn quantized_raw_impacts_match_sporse_ranking_for_fixed_point_weights() {
     assert_rankings_close(&expected, &got);
 }
 
+#[test]
+fn quantized_raw_impacts_match_quantized_sparse_oracle_on_heavy_tailed_fixture() {
+    let docs = generated_docs(384, 2_048, 48, 0x51ade_51ade);
+    let path = write_raw_impact_file(&docs, SCALE);
+    let mut raw = RawSegmentFile::open(path.as_path()).unwrap();
+
+    let queries = generated_queries(32, 2_048, 16);
+    for (query_id, query) in queries.iter().enumerate() {
+        let expected = top_k_by_score(&docs, query, 10, |query, doc| {
+            quantized_dot(query, doc, SCALE)
+        });
+        let got = raw
+            .top_k_weighted_u32(&raw_query(query, SCALE), 10)
+            .unwrap();
+        assert_rankings_close(&expected, &got);
+        assert!(
+            got.len() <= 10,
+            "query {query_id}: raw scorer returned more than k results"
+        );
+    }
+}
+
+#[test]
+fn quantized_raw_impacts_preserve_exact_ranking_when_margin_exceeds_rounding_bound() {
+    let docs = vec![
+        (1, SparseVec::new(vec![(1, 3.014), (2, 2.019), (9, 0.331)])),
+        (2, SparseVec::new(vec![(1, 2.512), (2, 1.901), (7, 1.101)])),
+        (3, SparseVec::new(vec![(1, 1.403), (3, 3.307), (7, 0.221)])),
+        (4, SparseVec::new(vec![(2, 1.104), (3, 1.101), (5, 2.229)])),
+        (5, SparseVec::new(vec![(8, 9.0)])),
+    ];
+    let query = SparseVec::new(vec![(1, 1.70), (2, 0.80), (3, 0.40)]);
+    let k = 3;
+
+    let exact = top_k_by_score(&docs, &query, docs.len(), |query, doc| query.dot(doc));
+    let margin = exact[k - 1].1 - exact[k].1;
+    let error_bound = quantized_score_error_bound(&query, SCALE);
+    assert!(
+        margin > 2.0 * error_bound,
+        "fixture must pin a stable ranking: margin={margin}, bound={error_bound}"
+    );
+
+    let path = write_raw_impact_file(&docs, SCALE);
+    let mut raw = RawSegmentFile::open(path.as_path()).unwrap();
+    let got = raw
+        .top_k_weighted_u32(&raw_query(&query, SCALE), k)
+        .unwrap();
+    let expected = &exact[..k];
+
+    assert_eq!(
+        doc_ids(expected),
+        doc_ids(&got),
+        "ranking should be invariant when the exact score gap exceeds rounding error"
+    );
+    for (&(doc_id, exact_score), &(_, raw_score)) in expected.iter().zip(got.iter()) {
+        assert!(
+            (exact_score - raw_score).abs() <= error_bound + 1e-5,
+            "doc {doc_id}: exact={exact_score}, raw={raw_score}, bound={error_bound}"
+        );
+    }
+}
+
 fn quantize(weight: f32) -> u32 {
+    quantize_with_scale(weight, SCALE)
+}
+
+fn quantize_with_scale(weight: f32, scale: f32) -> u32 {
     assert!(weight.is_finite() && weight >= 0.0);
-    let scaled = (weight * SCALE).round();
+    let scaled = (weight * scale).round();
     assert!(scaled > 0.0 && scaled <= u32::MAX as f32);
     scaled as u32
+}
+
+fn write_raw_impact_file(docs: &[(u32, SparseVec)], scale: f32) -> TempRawPath {
+    let raw_terms: Vec<Vec<(RawTermId, u32)>> = docs
+        .iter()
+        .map(|(_, vector)| {
+            vector
+                .pairs()
+                .iter()
+                .map(|&(dim, weight)| (dim as RawTermId, quantize_with_scale(weight, scale)))
+                .collect()
+        })
+        .collect();
+    let raw_docs: Vec<_> = docs
+        .iter()
+        .zip(raw_terms.iter())
+        .map(|((doc_id, _), terms)| RawDocument::new(*doc_id, terms))
+        .collect();
+    let bytes = write_u64_u32_segment(&raw_docs).unwrap();
+
+    let path = TempRawPath::new();
+    std::fs::write(path.as_path(), bytes).unwrap();
+    path
+}
+
+fn raw_query(query: &SparseVec, scale: f32) -> Vec<(RawTermId, f32)> {
+    query
+        .pairs()
+        .iter()
+        .map(|&(dim, weight)| (dim as RawTermId, weight / scale))
+        .collect()
+}
+
+fn quantized_dot(query: &SparseVec, doc: &SparseVec, scale: f32) -> f32 {
+    let (mut qi, mut di) = (0, 0);
+    let (q, d) = (query.pairs(), doc.pairs());
+    let mut sum = 0.0;
+    while qi < q.len() && di < d.len() {
+        match q[qi].0.cmp(&d[di].0) {
+            std::cmp::Ordering::Equal => {
+                sum += q[qi].1 * quantize_with_scale(d[di].1, scale) as f32 / scale;
+                qi += 1;
+                di += 1;
+            }
+            std::cmp::Ordering::Less => qi += 1,
+            std::cmp::Ordering::Greater => di += 1,
+        }
+    }
+    sum
+}
+
+fn quantized_score_error_bound(query: &SparseVec, scale: f32) -> f32 {
+    query
+        .pairs()
+        .iter()
+        .map(|&(_, weight)| weight.abs() * 0.5 / scale)
+        .sum()
+}
+
+fn top_k_by_score(
+    docs: &[(u32, SparseVec)],
+    query: &SparseVec,
+    k: usize,
+    mut score: impl FnMut(&SparseVec, &SparseVec) -> f32,
+) -> Vec<(u32, f32)> {
+    let mut ranked: Vec<_> = docs
+        .iter()
+        .filter_map(|(doc_id, doc)| {
+            let score = score(query, doc);
+            (score > 0.0 && score.is_finite()).then_some((*doc_id, score))
+        })
+        .collect();
+    ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.truncate(k);
+    ranked
+}
+
+fn doc_ids(results: &[(u32, f32)]) -> Vec<u32> {
+    results.iter().map(|(doc_id, _)| *doc_id).collect()
+}
+
+fn generated_docs(n_docs: u32, vocab: u32, nnz: usize, seed: u64) -> Vec<(u32, SparseVec)> {
+    let mut state = seed;
+    (0..n_docs)
+        .map(|doc_id| (doc_id, generated_sparse(&mut state, vocab, nnz)))
+        .collect()
+}
+
+fn generated_queries(n_queries: usize, vocab: u32, nnz: usize) -> Vec<SparseVec> {
+    let mut state = QUERY_SEED;
+    (0..n_queries)
+        .map(|_| generated_sparse(&mut state, vocab, nnz))
+        .collect()
+}
+
+fn generated_sparse(state: &mut u64, vocab: u32, nnz: usize) -> SparseVec {
+    let pairs = (0..nnz)
+        .map(|_| {
+            let dim = (xorshift(state) % vocab as u64) as u32;
+            let weight = lognormal_weight(state);
+            (dim, weight)
+        })
+        .collect();
+    SparseVec::new(pairs)
+}
+
+fn lognormal_weight(state: &mut u64) -> f32 {
+    let u1 = rand_f32(state).max(1e-9);
+    let u2 = rand_f32(state);
+    let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos();
+    (0.3 + 0.8 * z).exp().clamp(0.01, 20.0)
+}
+
+fn rand_f32(state: &mut u64) -> f32 {
+    (xorshift(state) >> 11) as f32 / (1u64 << 53) as f32
+}
+
+fn xorshift(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
 }
 
 fn assert_rankings_close(expected: &[(u32, f32)], got: &[(u32, f32)]) {

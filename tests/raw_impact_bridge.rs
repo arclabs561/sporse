@@ -6,7 +6,9 @@
 //! a raw segment can reproduce `sporse` rankings without rebuilding an in-memory
 //! `SporseIndex` from the segment payload.
 
-use postings::raw::{write_u64_u32_segment, RawDocument, RawSegmentFile, RawTermId};
+use postings::raw::{
+    top_k_weighted_u32_files, write_u64_u32_segment, RawDocument, RawSegmentFile, RawTermId,
+};
 use sporse::{SparseVec, SporseIndex};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -82,6 +84,31 @@ fn quantized_raw_impacts_match_quantized_sparse_oracle_on_heavy_tailed_fixture()
         assert!(
             got.len() <= 10,
             "query {query_id}: raw scorer returned more than k results"
+        );
+    }
+}
+
+#[test]
+fn quantized_raw_impacts_match_quantized_sparse_oracle_across_files() {
+    let docs = generated_docs(512, 2_048, 48, 0x517e_517e);
+    let paths = write_raw_impact_files(&docs, SCALE, 4);
+    let mut files: Vec<_> = paths
+        .iter()
+        .map(|path| RawSegmentFile::open(path.as_path()).unwrap())
+        .collect();
+    let mut segments: Vec<&mut RawSegmentFile> = files.iter_mut().collect();
+
+    let queries = generated_queries(16, 2_048, 16);
+    for (query_id, query) in queries.iter().enumerate() {
+        let expected = top_k_by_score(&docs, query, 10, |query, doc| {
+            quantized_dot(query, doc, SCALE)
+        });
+        let got = top_k_weighted_u32_files(&mut segments, &raw_query(query, SCALE), 10).unwrap();
+
+        assert_rankings_close(&expected, &got);
+        assert!(
+            got.len() <= 10,
+            "query {query_id}: multi-file raw scorer returned more than k results"
         );
     }
 }
@@ -219,6 +246,18 @@ fn write_raw_impact_file(docs: &[(u32, SparseVec)], scale: f32) -> TempRawPath {
     let path = TempRawPath::new();
     std::fs::write(path.as_path(), bytes).unwrap();
     path
+}
+
+fn write_raw_impact_files(
+    docs: &[(u32, SparseVec)],
+    scale: f32,
+    n_files: usize,
+) -> Vec<TempRawPath> {
+    assert!(n_files > 0);
+    let chunk_size = docs.len().div_ceil(n_files);
+    docs.chunks(chunk_size)
+        .map(|chunk| write_raw_impact_file(chunk, scale))
+        .collect()
 }
 
 fn raw_query(query: &SparseVec, scale: f32) -> Vec<(RawTermId, f32)> {

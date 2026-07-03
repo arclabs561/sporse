@@ -15,6 +15,8 @@ All notable changes to this project are documented here. Format based on [Keep a
   segments pruned, and writer-buffer pruning.
 - Added store benchmark diagnostics that report writer and reader segment
   pruning on a partitioned multi-segment corpus.
+- Added multi-file quantized raw-impact parity coverage against the quantized
+  sparse oracle.
 
 ### Changed
 

@@ -80,9 +80,9 @@ cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [
   source sparse-vector segments are still loaded by the current `segstore` open
   path; fully out-of-core learned-sparse search needs byte-native sparse segment
   sidecars. `postings::raw` already covers `u32` impact-score segments, while
-  native `SparseVec` weights are `f32`, so sporse still needs either a `f32`
-  raw format or an explicit quantized-impact path before it can search segment
-  files directly.
+  native `SparseVec` weights are `f32`. The current test suite covers a
+  quantized-impact bridge and recall sweeps across scales, but that path is not
+  public storage API yet.
 
 ## References
 

@@ -26,6 +26,8 @@ All notable changes to this project are documented here. Format based on [Keep a
   of keeping one duplicate after sorting.
 - Changed store search to skip finite zero-bound segment and buffer indexes
   before calling per-segment WAND.
+- Changed cold store writer searches to order sealed segments by query upper
+  bound immediately after loading or building per-segment indexes.
 - Changed raw-impact benchmark setup to stream sorted postings raw documents
   directly to temp files instead of building a full raw segment byte vector
   before writing.

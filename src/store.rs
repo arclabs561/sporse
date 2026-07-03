@@ -290,7 +290,6 @@ impl UpdatableIndex {
             stats.sealed_segments = ids.len();
             self.prune_cache_to_current_segments();
             let mut cache = self.cache.borrow_mut();
-            let all_cached = ids.iter().all(|id| cache.by_segment_id.contains_key(id));
             // Build only segments not already cached, loading a persisted sidecar
             // first when one matches the current recipe and live id set.
             for (i, seg) in segs.iter().enumerate() {
@@ -301,58 +300,36 @@ impl UpdatableIndex {
                     .or_insert_with(|| self.build_or_load(&seg[..], seg_id));
             }
 
-            if all_cached {
-                let mut order: Vec<(u64, f32)> = ids
-                    .iter()
-                    .filter_map(|seg_id| {
-                        cache
-                            .by_segment_id
-                            .get(seg_id)
-                            .and_then(|idx| idx.as_ref())
-                            .map(|idx| (*seg_id, idx.query_upper_bound(query)))
-                    })
-                    .collect();
-                order.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
-                for (seg_id, upper_bound) in order {
-                    if Self::is_finite_zero_bound(upper_bound)
-                        || (cand.len() >= k && upper_bound <= threshold)
-                    {
-                        stats.pruned_segments += 1;
-                        continue;
-                    }
-                    if let Some(idx) = cache
+            let mut order: Vec<(u64, f32)> = ids
+                .iter()
+                .filter_map(|seg_id| {
+                    cache
                         .by_segment_id
-                        .get(&seg_id)
+                        .get(seg_id)
                         .and_then(|idx| idx.as_ref())
-                    {
-                        stats.searched_segments += 1;
-                        let results = if cand.len() >= k {
-                            idx.search_above(query, k, threshold)
-                        } else {
-                            idx.search(query, k)
-                        };
-                        threshold = Self::merge_top_k(&mut cand, results, k);
-                    }
+                        .map(|idx| (*seg_id, idx.query_upper_bound(query)))
+                })
+                .collect();
+            order.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+            for (seg_id, upper_bound) in order {
+                if Self::is_finite_zero_bound(upper_bound)
+                    || (cand.len() >= k && upper_bound <= threshold)
+                {
+                    stats.pruned_segments += 1;
+                    continue;
                 }
-            } else {
-                for seg_id in ids {
-                    if let Some(idx) = cache.by_segment_id.get(seg_id).and_then(|idx| idx.as_ref())
-                    {
-                        let upper_bound = idx.query_upper_bound(query);
-                        if Self::is_finite_zero_bound(upper_bound)
-                            || (cand.len() >= k && upper_bound <= threshold)
-                        {
-                            stats.pruned_segments += 1;
-                            continue;
-                        }
-                        stats.searched_segments += 1;
-                        let results = if cand.len() >= k {
-                            idx.search_above(query, k, threshold)
-                        } else {
-                            idx.search(query, k)
-                        };
-                        threshold = Self::merge_top_k(&mut cand, results, k);
-                    }
+                if let Some(idx) = cache
+                    .by_segment_id
+                    .get(&seg_id)
+                    .and_then(|idx| idx.as_ref())
+                {
+                    stats.searched_segments += 1;
+                    let results = if cand.len() >= k {
+                        idx.search_above(query, k, threshold)
+                    } else {
+                        idx.search(query, k)
+                    };
+                    threshold = Self::merge_top_k(&mut cand, results, k);
                 }
             }
         }
@@ -836,6 +813,25 @@ mod tests {
         assert_eq!(reader_stats.searched_segments, 1);
         assert_eq!(reader_stats.pruned_segments, 1);
         assert_eq!(reader_stats.buffered_docs, 0);
+    }
+
+    #[test]
+    fn cold_writer_search_orders_segments_by_upper_bound() {
+        let dir = MemoryDirectory::arc();
+        let mut store = UpdatableIndex::open(dir, 1).unwrap();
+        store.add(0, sv(&[(0, 1.0)])).unwrap();
+        store.add(1, sv(&[(0, 100.0)])).unwrap();
+        store.add(2, sv(&[(0, 2.0)])).unwrap();
+        store.checkpoint().unwrap();
+
+        let q = sv(&[(0, 1.0)]);
+        let (hits, stats) = store.search_with_stats(&q, 1);
+
+        assert_eq!(hits, vec![(1, 100.0)]);
+        assert_eq!(stats.sealed_segments, 3);
+        assert_eq!(stats.searched_segments, 1);
+        assert_eq!(stats.pruned_segments, 2);
+        assert_eq!(stats.buffered_docs, 0);
     }
 
     #[test]

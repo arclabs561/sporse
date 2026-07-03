@@ -124,6 +124,42 @@ fn quantized_raw_impacts_preserve_exact_ranking_when_margin_exceeds_rounding_bou
     }
 }
 
+#[test]
+fn quantized_raw_impacts_recall_sweep_improves_with_scale() {
+    let docs = generated_docs(512, 2_048, 48, 0xacc0_7a1e);
+    let queries = generated_queries(24, 2_048, 16);
+    let k = 10usize;
+
+    let recall_at_10 = scale_sweep_recall(&docs, &queries, k);
+
+    assert!(
+        recall_at_10[2] >= 0.95,
+        "scale 100 should preserve high recall on the heavy-tailed fixture: {recall_at_10:?}"
+    );
+    assert!(
+        recall_at_10[2] >= recall_at_10[0],
+        "finer quantization should not underperform the coarse scale: {recall_at_10:?}"
+    );
+}
+
+#[test]
+fn quantized_raw_impacts_recall_sweep_covers_flat_weights() {
+    let docs = generated_flat_docs(512, 2_048, 48, 0xf1a7_f1a7);
+    let queries = generated_flat_queries(24, 2_048, 16);
+    let k = 10usize;
+
+    let recall_at_10 = scale_sweep_recall(&docs, &queries, k);
+
+    assert!(
+        recall_at_10[2] >= 0.90,
+        "scale 100 should preserve useful recall on the flatter fixture: {recall_at_10:?}"
+    );
+    assert!(
+        recall_at_10[2] >= recall_at_10[0],
+        "finer quantization should not underperform the coarse scale: {recall_at_10:?}"
+    );
+}
+
 fn quantize(weight: f32) -> u32 {
     quantize_with_scale(weight, SCALE)
 }
@@ -214,6 +250,40 @@ fn doc_ids(results: &[(u32, f32)]) -> Vec<u32> {
     results.iter().map(|(doc_id, _)| *doc_id).collect()
 }
 
+fn mean_raw_recall_at_k(
+    docs: &[(u32, SparseVec)],
+    queries: &[SparseVec],
+    k: usize,
+    scale: f32,
+) -> f32 {
+    let path = write_raw_impact_file(docs, scale);
+    let mut raw = RawSegmentFile::open(path.as_path()).unwrap();
+    let mut total = 0.0f32;
+    for query in queries {
+        let exact = top_k_by_score(docs, query, k, |query, doc| query.dot(doc));
+        let got = raw.top_k_weighted_u32(&raw_query(query, scale), k).unwrap();
+        total += recall_at_k(&doc_ids(&exact), &doc_ids(&got), k);
+    }
+    total / queries.len() as f32
+}
+
+fn scale_sweep_recall(docs: &[(u32, SparseVec)], queries: &[SparseVec], k: usize) -> Vec<f32> {
+    [10.0, 25.0, 100.0]
+        .into_iter()
+        .map(|scale| mean_raw_recall_at_k(docs, queries, k, scale))
+        .collect()
+}
+
+fn recall_at_k(expected: &[u32], got: &[u32], k: usize) -> f32 {
+    let got: std::collections::HashSet<_> = got.iter().copied().collect();
+    let hits = expected
+        .iter()
+        .take(k)
+        .filter(|doc_id| got.contains(doc_id))
+        .count();
+    hits as f32 / k as f32
+}
+
 fn generated_docs(n_docs: u32, vocab: u32, nnz: usize, seed: u64) -> Vec<(u32, SparseVec)> {
     let mut state = seed;
     (0..n_docs)
@@ -228,11 +298,36 @@ fn generated_queries(n_queries: usize, vocab: u32, nnz: usize) -> Vec<SparseVec>
         .collect()
 }
 
+fn generated_flat_docs(n_docs: u32, vocab: u32, nnz: usize, seed: u64) -> Vec<(u32, SparseVec)> {
+    let mut state = seed;
+    (0..n_docs)
+        .map(|doc_id| (doc_id, generated_flat_sparse(&mut state, vocab, nnz)))
+        .collect()
+}
+
+fn generated_flat_queries(n_queries: usize, vocab: u32, nnz: usize) -> Vec<SparseVec> {
+    let mut state = QUERY_SEED ^ 0x51a7_51a7;
+    (0..n_queries)
+        .map(|_| generated_flat_sparse(&mut state, vocab, nnz))
+        .collect()
+}
+
 fn generated_sparse(state: &mut u64, vocab: u32, nnz: usize) -> SparseVec {
     let pairs = (0..nnz)
         .map(|_| {
             let dim = (xorshift(state) % vocab as u64) as u32;
             let weight = lognormal_weight(state);
+            (dim, weight)
+        })
+        .collect();
+    SparseVec::new(pairs)
+}
+
+fn generated_flat_sparse(state: &mut u64, vocab: u32, nnz: usize) -> SparseVec {
+    let pairs = (0..nnz)
+        .map(|_| {
+            let dim = (xorshift(state) % vocab as u64) as u32;
+            let weight = 0.05 + rand_f32(state) * 0.95;
             (dim, weight)
         })
         .collect();

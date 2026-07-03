@@ -81,8 +81,8 @@ cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [
   path; fully out-of-core learned-sparse search needs byte-native sparse segment
   sidecars. `postings::raw` already covers `u32` impact-score segments, while
   native `SparseVec` weights are `f32`. The current test suite covers a
-  quantized-impact bridge and recall sweeps across scales, but that path is not
-  public storage API yet.
+  quantized-impact bridge and recall sweeps across scales and query densities,
+  but that path is not public storage API yet.
 
 ## References
 

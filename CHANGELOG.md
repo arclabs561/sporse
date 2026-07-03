@@ -8,6 +8,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 - Added search benchmark coverage for quantized `postings::raw` u32 impact
   files, including a diagnostic top-k agreement check against brute force.
+- Added quantized raw-impact recall sweeps across query densities, so the
+  byte-backed path is checked beyond one SPLADE-style query shape.
 
 ## [0.6.6] - 2026-07-03
 

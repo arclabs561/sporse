@@ -9,10 +9,12 @@
 use postings::raw::{write_u64_u32_segment, RawDocument, RawSegmentFile, RawTermId};
 use sporse::{SparseVec, SporseIndex};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const SCALE: f32 = 100.0;
 const QUERY_SEED: u64 = 0x5eed_ba5e_1234_9876;
+static TEMP_RAW_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn quantized_raw_impacts_match_sporse_ranking_for_fixed_point_weights() {
@@ -160,6 +162,31 @@ fn quantized_raw_impacts_recall_sweep_covers_flat_weights() {
     );
 }
 
+#[test]
+fn quantized_raw_impacts_recall_sweep_covers_query_density() {
+    let docs = generated_docs(640, 4_096, 64, 0xd351_7e57);
+    let k = 10usize;
+
+    for (query_nnz, min_recall) in [(4, 0.95), (16, 0.92), (64, 0.85)] {
+        let queries = generated_queries_with_seed(
+            16,
+            4_096,
+            query_nnz,
+            QUERY_SEED ^ (query_nnz as u64).wrapping_mul(0x9e37_79b9),
+        );
+        let recall_at_k = scale_sweep_recall_for_scales(&docs, &queries, k, &[25.0, 100.0, 250.0]);
+
+        assert!(
+            recall_at_k[1] >= min_recall,
+            "scale 100 recall should hold for query_nnz={query_nnz}: {recall_at_k:?}"
+        );
+        assert!(
+            recall_at_k[2] >= recall_at_k[0],
+            "finer quantization should not underperform the coarse scale for query_nnz={query_nnz}: {recall_at_k:?}"
+        );
+    }
+}
+
 fn quantize(weight: f32) -> u32 {
     quantize_with_scale(weight, SCALE)
 }
@@ -268,9 +295,18 @@ fn mean_raw_recall_at_k(
 }
 
 fn scale_sweep_recall(docs: &[(u32, SparseVec)], queries: &[SparseVec], k: usize) -> Vec<f32> {
-    [10.0, 25.0, 100.0]
-        .into_iter()
-        .map(|scale| mean_raw_recall_at_k(docs, queries, k, scale))
+    scale_sweep_recall_for_scales(docs, queries, k, &[10.0, 25.0, 100.0])
+}
+
+fn scale_sweep_recall_for_scales(
+    docs: &[(u32, SparseVec)],
+    queries: &[SparseVec],
+    k: usize,
+    scales: &[f32],
+) -> Vec<f32> {
+    scales
+        .iter()
+        .map(|&scale| mean_raw_recall_at_k(docs, queries, k, scale))
         .collect()
 }
 
@@ -292,7 +328,16 @@ fn generated_docs(n_docs: u32, vocab: u32, nnz: usize, seed: u64) -> Vec<(u32, S
 }
 
 fn generated_queries(n_queries: usize, vocab: u32, nnz: usize) -> Vec<SparseVec> {
-    let mut state = QUERY_SEED;
+    generated_queries_with_seed(n_queries, vocab, nnz, QUERY_SEED)
+}
+
+fn generated_queries_with_seed(
+    n_queries: usize,
+    vocab: u32,
+    nnz: usize,
+    seed: u64,
+) -> Vec<SparseVec> {
+    let mut state = seed;
     (0..n_queries)
         .map(|_| generated_sparse(&mut state, vocab, nnz))
         .collect()
@@ -373,9 +418,10 @@ impl TempRawPath {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
+        let sequence = TEMP_RAW_COUNTER.fetch_add(1, Ordering::Relaxed);
         Self {
             path: std::env::temp_dir().join(format!(
-                "sporse-raw-impact-{}-{nanos}.raw",
+                "sporse-raw-impact-{}-{nanos}-{sequence}.raw",
                 std::process::id()
             )),
         }

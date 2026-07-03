@@ -79,7 +79,10 @@ cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [
   cloneable checkpoint-visible snapshot views for concurrent searches. The
   source sparse-vector segments are still loaded by the current `segstore` open
   path; fully out-of-core learned-sparse search needs byte-native sparse segment
-  sidecars.
+  sidecars. `postings::raw` already covers `u32` impact-score segments, while
+  native `SparseVec` weights are `f32`, so sporse still needs either a `f32`
+  raw format or an explicit quantized-impact path before it can search segment
+  files directly.
 
 ## References
 

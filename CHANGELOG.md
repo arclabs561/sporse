@@ -4,6 +4,11 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- Added search benchmark coverage for quantized `postings::raw` u32 impact
+  files, including a diagnostic top-k agreement check against brute force.
+
 ## [0.6.6] - 2026-07-03
 
 ### Added

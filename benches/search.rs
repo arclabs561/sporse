@@ -5,7 +5,10 @@
 /// - 10K documents, 30K vocabulary, ~120 nonzero dims per doc
 /// - Queries: ~50 nonzero dims (also log-normal weights)
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use postings::raw::{write_u64_u32_segment, RawDocument, RawSegmentFile, RawTermId};
 use sporse::{SparseVec, SporseIndex};
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // ── Corpus parameters ────────────────────────────────────────────────────────
 
@@ -15,6 +18,7 @@ const DOC_NNZ: usize = 120; // nonzero dims per document
 const QUERY_NNZ: usize = 50; // nonzero dims per query
 const N_QUERIES: usize = 32; // query batch size for latency benchmarks
 const BENCH_SEED: u64 = 0xDEAD_BEEF_CAFE_1337;
+const IMPACT_SCALE: f32 = 100.0;
 
 // ── Minimal deterministic RNG (xorshift64) ───────────────────────────────────
 
@@ -60,6 +64,8 @@ struct Fixture {
     index: SporseIndex,
     docs: Vec<SparseVec>,
     queries: Vec<SparseVec>,
+    raw_path: TempRawPath,
+    raw_queries: Vec<Vec<(RawTermId, f32)>>,
 }
 
 impl Fixture {
@@ -81,12 +87,83 @@ impl Fixture {
         let queries: Vec<SparseVec> = (0..N_QUERIES)
             .map(|_| gen_sparse(&mut qrng, VOCAB, QUERY_NNZ))
             .collect();
+        let raw_path = write_raw_impact_file(&docs);
+        let raw_queries = queries
+            .iter()
+            .map(|query| raw_query(query, IMPACT_SCALE))
+            .collect();
 
         Fixture {
             index,
             docs,
             queries,
+            raw_path,
+            raw_queries,
         }
+    }
+}
+
+fn write_raw_impact_file(docs: &[SparseVec]) -> TempRawPath {
+    let raw_terms: Vec<Vec<_>> = docs
+        .iter()
+        .map(|doc| {
+            doc.pairs()
+                .iter()
+                .map(|&(dim, weight)| (dim as RawTermId, quantize(weight, IMPACT_SCALE)))
+                .collect()
+        })
+        .collect();
+    let raw_docs: Vec<_> = raw_terms
+        .iter()
+        .enumerate()
+        .map(|(doc_id, terms)| RawDocument::new(doc_id as u32, terms))
+        .collect();
+    let bytes = write_u64_u32_segment(&raw_docs).unwrap();
+    let path = TempRawPath::new();
+    std::fs::write(path.as_path(), bytes).unwrap();
+    path
+}
+
+fn raw_query(query: &SparseVec, scale: f32) -> Vec<(RawTermId, f32)> {
+    query
+        .pairs()
+        .iter()
+        .map(|&(dim, weight)| (dim as RawTermId, weight / scale))
+        .collect()
+}
+
+fn quantize(weight: f32, scale: f32) -> u32 {
+    let scaled = (weight * scale).round();
+    debug_assert!(scaled.is_finite() && scaled > 0.0 && scaled <= u32::MAX as f32);
+    scaled as u32
+}
+
+struct TempRawPath {
+    path: PathBuf,
+}
+
+impl TempRawPath {
+    fn new() -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        Self {
+            path: std::env::temp_dir().join(format!(
+                "sporse-raw-impact-bench-{}-{nanos}.raw",
+                std::process::id()
+            )),
+        }
+    }
+
+    fn as_path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempRawPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -127,6 +204,7 @@ fn bench_build(c: &mut Criterion) {
 
 fn bench_search(c: &mut Criterion) {
     let fixture = Fixture::build();
+    let mut raw_segment = RawSegmentFile::open(fixture.raw_path.as_path()).unwrap();
     let mut group = c.benchmark_group("search");
 
     for k in [10usize, 100] {
@@ -155,6 +233,19 @@ fn bench_search(c: &mut Criterion) {
                 total_score
             });
         });
+
+        group.bench_with_input(BenchmarkId::new("raw_u32_file_top", k), &k, |b, &k| {
+            b.iter(|| {
+                let mut total_score = 0.0f32;
+                for q in &fixture.raw_queries {
+                    let results = raw_segment.top_k_weighted_u32(q, k).unwrap();
+                    if let Some(&(_, s)) = results.first() {
+                        total_score += s;
+                    }
+                }
+                total_score
+            });
+        });
     }
 
     group.finish();
@@ -171,15 +262,24 @@ fn print_diagnostics(c: &mut Criterion) {
     let mut total_iterations = 0u64;
     let mut total_scored = 0u64;
     let mut total_skips = 0u64;
+    let mut raw_agrees = 0;
+    let mut raw_segment = RawSegmentFile::open(fixture.raw_path.as_path()).unwrap();
 
-    for q in fixture.queries.iter().take(n_check) {
+    for (i, q) in fixture.queries.iter().take(n_check).enumerate() {
         let (wand, stats) = fixture.index.search_with_stats(q, k);
         let bf = brute_force(&fixture.docs, q, k);
+        let raw = raw_segment
+            .top_k_weighted_u32(&fixture.raw_queries[i], k)
+            .unwrap();
 
         let wand_ids: std::collections::HashSet<u32> = wand.iter().map(|r| r.0).collect();
         let bf_ids: std::collections::HashSet<u32> = bf.iter().map(|r| r.0).collect();
         if wand_ids == bf_ids {
             wand_agrees += 1;
+        }
+        let raw_ids: std::collections::HashSet<u32> = raw.iter().map(|r| r.0).collect();
+        if raw_ids == bf_ids {
+            raw_agrees += 1;
         }
         total_iterations += stats.iterations;
         total_scored += stats.docs_scored;
@@ -201,6 +301,10 @@ fn print_diagnostics(c: &mut Criterion) {
     eprintln!(
         "\n[sporse diagnostics] WAND top-{k} agrees with brute force: {}/{} queries",
         wand_agrees, n_check
+    );
+    eprintln!(
+        "[sporse diagnostics] quantized raw u32 file top-{k} agrees with brute force: {}/{} queries",
+        raw_agrees, n_check
     );
     eprintln!(
         "[sporse diagnostics] Index: {} docs, {} vocab dims, ~{DOC_NNZ} nnz/doc, ~{QUERY_NNZ} nnz/query",

@@ -6,7 +6,8 @@
 /// - Queries: ~50 nonzero dims (also log-normal weights)
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use postings::raw::{
-    top_k_weighted_u32_files, write_u64_u32_segment, RawDocument, RawSegmentFile, RawTermId,
+    top_k_weighted_u32_files, write_u64_u32_segment_sorted_from_iter_to, RawDocument,
+    RawSegmentFile, RawTermId,
 };
 use sporse::{SparseVec, SporseIndex};
 use std::path::PathBuf;
@@ -122,14 +123,13 @@ fn write_raw_impact_file_with_base(docs: &[SparseVec], base_doc_id: u32) -> Temp
                 .collect()
         })
         .collect();
-    let raw_docs: Vec<_> = raw_terms
+    let path = TempRawPath::new();
+    let docs = raw_terms
         .iter()
         .enumerate()
-        .map(|(doc_id, terms)| RawDocument::new(base_doc_id + doc_id as u32, terms))
-        .collect();
-    let bytes = write_u64_u32_segment(&raw_docs).unwrap();
-    let path = TempRawPath::new();
-    std::fs::write(path.as_path(), bytes).unwrap();
+        .map(|(doc_id, terms)| RawDocument::new(base_doc_id + doc_id as u32, terms));
+    let mut file = std::fs::File::create(path.as_path()).unwrap();
+    write_u64_u32_segment_sorted_from_iter_to(docs, &mut file).unwrap();
     path
 }
 

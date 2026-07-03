@@ -29,6 +29,9 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ### Fixed
 
+- `store::UpdatableIndex` now keys its in-memory per-segment cache by segstore's
+  stable segment ids instead of `Arc` addresses, avoiding stale WAND indexes
+  after compaction/reclaim if the allocator reuses a freed segment address.
 - `store::UpdatableIndex::{compact, compact_tiers, reclaim}` now persist sidecars
   for newly merged segments immediately after segstore checkpoints them, instead
   of waiting for the next search to rebuild and write the sidecar lazily.

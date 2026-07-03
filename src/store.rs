@@ -62,17 +62,19 @@ impl Store for SparseBacking {
     }
 }
 
-/// Per-segment indexes keyed by the segment's stable `Arc` identity. Because
-/// segstore keeps an unchanged segment's `Arc` across mutations, a sealed add
-/// only builds the one new segment's index (the rest are reused) instead of
-/// rebuilding the whole corpus -- the dominant cost in an add-then-search loop.
+/// Per-segment indexes keyed by segstore's stable segment id. A sealed add
+/// creates one new segment id, so cached indexes for existing segments are
+/// reused instead of rebuilding the whole corpus on the next query. Segment
+/// ids are monotonic and never reused, unlike `Arc` addresses, which the
+/// allocator can hand back to a new segment after compaction frees an old one
+/// (the ABA hazard a pointer-keyed cache is exposed to).
 struct Cache {
-    by_ptr: HashMap<usize, Option<SporseIndex>>,
+    by_segment_id: HashMap<u64, Option<SporseIndex>>,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct ReaderCacheKey {
-    ptr: usize,
+    segment_id: u64,
     live_ids: Vec<u32>,
 }
 
@@ -134,7 +136,7 @@ impl UpdatableIndex {
             inner: SegmentedStore::open(dir, SparseBacking, flush_threshold)?,
             sidecar_recipe: Self::make_sidecar_recipe(),
             cache: RefCell::new(Cache {
-                by_ptr: HashMap::new(),
+                by_segment_id: HashMap::new(),
             }),
             persisted: RefCell::new(HashSet::new()),
         })
@@ -142,8 +144,8 @@ impl UpdatableIndex {
 
     /// Add (or re-add) a document by id.
     pub fn add(&mut self, id: u32, vec: SparseVec) -> PersistenceResult<()> {
-        // A sealed add introduces a new segment (a new Arc identity); existing
-        // segments keep theirs, so the cache reuses them and builds only the new one.
+        // A sealed add introduces a new segment id; existing segments keep theirs,
+        // so the cache reuses them and builds only the new one.
         self.inner.add(id, vec)?;
         Ok(())
     }
@@ -173,8 +175,8 @@ impl UpdatableIndex {
         let ids = self.inner.segment_ids();
         for (seg_idx, seg) in self.inner.segments().iter().enumerate() {
             if seg.iter().any(|(sid, _)| *sid == id) {
-                cache.by_ptr.remove(&(Arc::as_ptr(seg) as usize));
                 let seg_id = ids[seg_idx];
+                cache.by_segment_id.remove(&seg_id);
                 self.persisted.borrow_mut().remove(&seg_id);
                 let _ = self
                     .inner
@@ -188,6 +190,7 @@ impl UpdatableIndex {
     /// Merge segments (dropping tombstoned docs) and persist a checkpoint.
     pub fn compact(&mut self) -> PersistenceResult<()> {
         self.inner.compact()?;
+        self.prune_cache_to_current_segments();
         self.persist_new_segments();
         Ok(())
     }
@@ -204,6 +207,7 @@ impl UpdatableIndex {
     pub fn compact_tiers(&mut self) -> PersistenceResult<()> {
         let stats = self.inner.compact_tiers()?;
         if stats.merges > 0 {
+            self.prune_cache_to_current_segments();
             self.persist_new_segments();
         }
         Ok(())
@@ -215,6 +219,7 @@ impl UpdatableIndex {
     pub fn reclaim(&mut self, min_live_ratio: f64) -> PersistenceResult<()> {
         let stats = self.inner.reclaim_tombstones(min_live_ratio)?;
         if stats.merges > 0 {
+            self.prune_cache_to_current_segments();
             self.persist_new_segments();
         }
         Ok(())
@@ -253,44 +258,41 @@ impl UpdatableIndex {
         let mut threshold = 0.0f32;
         {
             let segs = self.inner.segments();
+            let ids = self.inner.segment_ids();
+            self.prune_cache_to_current_segments();
             let mut cache = self.cache.borrow_mut();
-            // Drop cached indexes for segments no longer present (post-compaction).
-            let current: std::collections::HashSet<usize> =
-                segs.iter().map(|a| Arc::as_ptr(a) as usize).collect();
-            cache.by_ptr.retain(|key, _| current.contains(key));
-            let all_cached = segs
-                .iter()
-                .all(|seg| cache.by_ptr.contains_key(&(Arc::as_ptr(seg) as usize)));
+            let all_cached = ids.iter().all(|id| cache.by_segment_id.contains_key(id));
             // Build only segments not already cached, loading a persisted sidecar
             // first when one matches the current recipe and live id set.
-            let ids = self.inner.segment_ids();
             for (i, seg) in segs.iter().enumerate() {
-                let key = Arc::as_ptr(seg) as usize;
                 let seg_id = ids[i];
                 cache
-                    .by_ptr
-                    .entry(key)
+                    .by_segment_id
+                    .entry(seg_id)
                     .or_insert_with(|| self.build_or_load(&seg[..], seg_id));
             }
 
             if all_cached {
-                let mut order: Vec<(usize, f32)> = segs
+                let mut order: Vec<(u64, f32)> = ids
                     .iter()
-                    .filter_map(|seg| {
-                        let key = Arc::as_ptr(seg) as usize;
+                    .filter_map(|seg_id| {
                         cache
-                            .by_ptr
-                            .get(&key)
+                            .by_segment_id
+                            .get(seg_id)
                             .and_then(|idx| idx.as_ref())
-                            .map(|idx| (key, idx.query_upper_bound(query)))
+                            .map(|idx| (*seg_id, idx.query_upper_bound(query)))
                     })
                     .collect();
                 order.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
-                for (key, upper_bound) in order {
+                for (seg_id, upper_bound) in order {
                     if cand.len() >= k && upper_bound <= threshold {
                         continue;
                     }
-                    if let Some(idx) = cache.by_ptr.get(&key).and_then(|idx| idx.as_ref()) {
+                    if let Some(idx) = cache
+                        .by_segment_id
+                        .get(&seg_id)
+                        .and_then(|idx| idx.as_ref())
+                    {
                         let results = if cand.len() >= k {
                             idx.search_above(query, k, threshold)
                         } else {
@@ -300,9 +302,9 @@ impl UpdatableIndex {
                     }
                 }
             } else {
-                for seg in segs {
-                    let key = Arc::as_ptr(seg) as usize;
-                    if let Some(idx) = cache.by_ptr.get(&key).and_then(|idx| idx.as_ref()) {
+                for seg_id in ids {
+                    if let Some(idx) = cache.by_segment_id.get(seg_id).and_then(|idx| idx.as_ref())
+                    {
                         let results = if cand.len() >= k {
                             idx.search_above(query, k, threshold)
                         } else {
@@ -327,14 +329,30 @@ impl UpdatableIndex {
         }
         // merge_top_k sorts only once k candidates have accumulated; with
         // fewer than k total matches cand is still in segment order.
-        cand.sort_by(|a, b| b.1.total_cmp(&a.1));
+        Self::sort_score_desc(&mut cand);
         cand
+    }
+
+    /// The one comparator for merged results: score descending, doc id
+    /// ascending on ties. Writer, reader, and merge paths must all use this so
+    /// equal-score ordering never depends on segment iteration order.
+    fn sort_score_desc(cand: &mut [(u32, f32)]) {
+        cand.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    }
+
+    fn prune_cache_to_current_segments(&self) {
+        let current: std::collections::HashSet<u64> =
+            self.inner.segment_ids().iter().copied().collect();
+        self.cache
+            .borrow_mut()
+            .by_segment_id
+            .retain(|id, _| current.contains(id));
     }
 
     fn merge_top_k(cand: &mut Vec<(u32, f32)>, mut results: Vec<(u32, f32)>, k: usize) -> f32 {
         cand.append(&mut results);
         if cand.len() >= k {
-            cand.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+            Self::sort_score_desc(cand);
             cand.truncate(k);
             cand.last().map_or(0.0, |(_, score)| *score)
         } else {
@@ -560,7 +578,7 @@ impl UpdatableView {
             .map(|(i, seg)| {
                 (
                     ReaderCacheKey {
-                        ptr: Arc::as_ptr(seg) as usize,
+                        segment_id: ids[i],
                         live_ids: UpdatableIndex::live_ids_vec_from(&seg[..], &live),
                     },
                     i,
@@ -617,6 +635,9 @@ impl UpdatableView {
             };
             threshold = UpdatableIndex::merge_top_k(&mut cand, results, k);
         }
+        // Same below-k caveat as the writer path: merge_top_k sorts only once
+        // k candidates have accumulated, so sort unconditionally here too.
+        UpdatableIndex::sort_score_desc(&mut cand);
         cand
     }
 }
@@ -831,21 +852,27 @@ mod tests {
         // Populate the cache.
         let q = SparseVec::new(vec![(0, 1.0)]);
         let _ = store.search(&q, 4);
-        assert_eq!(store.cache.borrow().by_ptr.len(), 2, "both segments cached");
+        assert_eq!(
+            store.cache.borrow().by_segment_id.len(),
+            2,
+            "both segments cached"
+        );
 
-        // Pointer of the segment that holds id 0.
+        // Segment id of the segment that holds id 0.
+        let ids = store.inner.segment_ids().to_vec();
         let holder = store
             .inner
             .segments()
             .iter()
-            .find(|s| s.iter().any(|(id, _)| *id == 0))
-            .map(|s| Arc::as_ptr(s) as usize)
+            .enumerate()
+            .find(|(_, s)| s.iter().any(|(id, _)| *id == 0))
+            .map(|(i, _)| ids[i])
             .unwrap();
 
         store.delete(0).unwrap();
 
-        let keys: std::collections::HashSet<usize> =
-            store.cache.borrow().by_ptr.keys().copied().collect();
+        let keys: std::collections::HashSet<u64> =
+            store.cache.borrow().by_segment_id.keys().copied().collect();
         assert!(!keys.contains(&holder), "holding segment was invalidated");
         assert_eq!(keys.len(), 1, "the other segment's cache was preserved");
 
@@ -854,6 +881,75 @@ mod tests {
         assert!(
             !top.contains(&0) && top.contains(&1),
             "delete correct: {top:?}"
+        );
+    }
+
+    #[test]
+    fn compact_prunes_cached_indexes_to_current_segments() {
+        // Regression for the ABA hazard: after compaction frees old segments,
+        // the allocator can reuse a freed Arc address for the merged segment,
+        // so a pointer-keyed cache could serve a stale index. Segment-id keys
+        // plus pruning on compact make that impossible; this pins the pruning.
+        let dir = MemoryDirectory::arc();
+        let mut store = UpdatableIndex::open(dir, 2).unwrap();
+        for i in 0..4u32 {
+            store
+                .add(i, SparseVec::new(vec![(0, 1.0 + i as f32)]))
+                .unwrap();
+        }
+        let q = SparseVec::new(vec![(0, 1.0)]);
+        let _ = store.search(&q, 4);
+        let before: std::collections::HashSet<u64> =
+            store.cache.borrow().by_segment_id.keys().copied().collect();
+        assert!(before.len() >= 2, "setup: multiple cached segments");
+
+        store.compact().unwrap();
+
+        let current: std::collections::HashSet<u64> =
+            store.inner.segment_ids().iter().copied().collect();
+        let cached: std::collections::HashSet<u64> =
+            store.cache.borrow().by_segment_id.keys().copied().collect();
+        assert!(
+            cached.is_subset(&current),
+            "cache holds only live segment ids after compact: cached={cached:?} current={current:?}"
+        );
+        assert!(
+            before.is_disjoint(&current),
+            "merged segment gets a fresh id, never a reused one"
+        );
+
+        // Post-compact search rebuilds from live segments and stays correct.
+        let top: Vec<u32> = store.search(&q, 4).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(top, vec![3, 2, 1, 0], "scores 4,3,2,1 in that order");
+    }
+
+    #[test]
+    fn reader_returns_sorted_results_below_k() {
+        // Regression: with fewer than k total matches, merge_top_k never
+        // sorts, so the reader path used to return results in segment order.
+        // Segment 1 holds the low scorer, segment 2 the high scorer.
+        let dir = MemoryDirectory::arc();
+        let mut store = UpdatableIndex::open(dir, 2).unwrap();
+        store.add(0, sv(&[(0, 1.0)])).unwrap();
+        store.add(1, sv(&[(1, 5.0)])).unwrap(); // seals segment {0,1}
+        store.add(2, sv(&[(0, 3.0)])).unwrap();
+        store.add(3, sv(&[(1, 2.0)])).unwrap(); // seals segment {2,3}
+        store.checkpoint().unwrap();
+
+        let q = sv(&[(0, 1.0)]);
+        // Only docs 0 and 2 match; k=10 stays below k throughout.
+        let reader_results = store.reader().search(&q, 10);
+        assert_eq!(
+            reader_results.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![2, 0],
+            "descending score order even below k: {reader_results:?}"
+        );
+
+        // Writer path agrees (same comparator, same order).
+        let writer_results = store.search(&q, 10);
+        assert_eq!(
+            writer_results.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![2, 0]
         );
     }
 

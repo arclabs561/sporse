@@ -69,7 +69,7 @@ cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [
 
 ## Features
 
-- `serde` -- Serialize/Deserialize for `SparseVec`
+- `serde` -- Serialize/Deserialize for `SparseVec` and built `SporseIndex`
 - `cli` -- the `sporse` binary (build and query an index from files)
 - `store` -- `store::UpdatableIndex`: an updatable, durable index (incremental
   add/delete, write-ahead log, checkpoint, compaction, crash recovery) backed by
@@ -96,3 +96,7 @@ cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [
 - Lassance, Formal, and Clinchant, "Composite Code Sparse Autoencoders for First
   Stage Retrieval" (arXiv:2204.07023). The latent C-hot composite codes the
   `sae` module learns.
+
+## License
+
+MIT OR Apache-2.0

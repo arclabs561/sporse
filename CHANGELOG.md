@@ -13,6 +13,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 - Added `store::{UpdatableIndex, UpdatableReader, UpdatableView}::search_with_stats`
   for segment-level search diagnostics: sealed segments seen, segments searched,
   segments pruned, and writer-buffer pruning.
+- Added store benchmark diagnostics that report writer and reader segment
+  pruning on a partitioned multi-segment corpus.
 
 ### Changed
 

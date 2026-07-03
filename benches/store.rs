@@ -22,6 +22,16 @@ const VOCAB: u32 = 30_000;
 const DOC_NNZ: usize = 80;
 #[cfg(feature = "store")]
 const FLUSH: usize = 2_000; // ~10 segments
+#[cfg(feature = "store")]
+const DIAG_SEGMENTS: usize = 10;
+#[cfg(feature = "store")]
+const DIAG_DOCS_PER_SEGMENT: usize = 200;
+#[cfg(feature = "store")]
+const DIAG_SEGMENT_VOCAB: u32 = 512;
+#[cfg(feature = "store")]
+const DIAG_DOC_NNZ: usize = 24;
+#[cfg(feature = "store")]
+const DIAG_QUERY_NNZ: usize = 16;
 
 #[cfg(feature = "store")]
 fn xorshift(state: &mut u64) -> u64 {
@@ -49,6 +59,32 @@ fn doc(state: &mut u64) -> sporse::SparseVec {
 }
 
 #[cfg(feature = "store")]
+fn partitioned_doc(state: &mut u64, segment: usize) -> sporse::SparseVec {
+    let base = segment as u32 * DIAG_SEGMENT_VOCAB;
+    let mut v: Vec<(u32, f32)> = (0..DIAG_DOC_NNZ)
+        .map(|_| {
+            (
+                base + (xorshift(state) % DIAG_SEGMENT_VOCAB as u64) as u32,
+                1.0 + (xorshift(state) % 8) as f32,
+            )
+        })
+        .collect();
+    v.sort_by_key(|(t, _)| *t);
+    v.dedup_by_key(|(t, _)| *t);
+    sporse::SparseVec::new(v)
+}
+
+#[cfg(feature = "store")]
+fn partitioned_query(segment: usize) -> sporse::SparseVec {
+    let base = segment as u32 * DIAG_SEGMENT_VOCAB;
+    sporse::SparseVec::new(
+        (0..DIAG_QUERY_NNZ)
+            .map(|i| (base + i as u32, 1.0 + (i % 4) as f32))
+            .collect(),
+    )
+}
+
+#[cfg(feature = "store")]
 fn fresh_store(
     warm: bool,
     checkpoint: bool,
@@ -72,6 +108,24 @@ fn fresh_store(
         let _ = store.search(&q, 10); // populate the per-segment cache
     }
     (dir, store, q)
+}
+
+#[cfg(feature = "store")]
+fn partitioned_store() -> (sporse::store::UpdatableIndex, sporse::SparseVec) {
+    use durability::MemoryDirectory;
+    let mut s = 0x9e37_79b9_7f4a_7c15u64;
+    let dir = MemoryDirectory::arc();
+    let mut store = sporse::store::UpdatableIndex::open(dir, DIAG_DOCS_PER_SEGMENT).unwrap();
+    for segment in 0..DIAG_SEGMENTS {
+        for doc in 0..DIAG_DOCS_PER_SEGMENT {
+            let id = (segment * DIAG_DOCS_PER_SEGMENT + doc) as u32;
+            store.add(id, partitioned_doc(&mut s, segment)).unwrap();
+        }
+    }
+    store.checkpoint().unwrap();
+    let query = partitioned_query(0);
+    let _ = store.search(&query, 10);
+    (store, query)
 }
 
 #[cfg(feature = "store")]
@@ -133,6 +187,42 @@ fn benches(c: &mut Criterion) {
 }
 
 #[cfg(feature = "store")]
+fn store_pruning_diagnostics(c: &mut Criterion) {
+    let (store, query) = partitioned_store();
+    let (writer_hits, writer_stats) = store.search_with_stats(&query, 10);
+    let reader = store.reader();
+    let (reader_hits, reader_stats) = reader.search_with_stats(&query, 10);
+
+    assert_eq!(
+        writer_hits, reader_hits,
+        "writer and checkpoint reader should agree after checkpoint"
+    );
+    assert!(
+        writer_stats.pruned_segments > 0 && reader_stats.pruned_segments > 0,
+        "partitioned diagnostic should exercise segment pruning"
+    );
+
+    eprintln!(
+        "\n[sporse store diagnostics] partitioned corpus: {DIAG_SEGMENTS} segments, \
+         {DIAG_DOCS_PER_SEGMENT} docs/segment"
+    );
+    eprintln!(
+        "[sporse store diagnostics] writer searched/pruned segments: {}/{} \
+         (sealed={})",
+        writer_stats.searched_segments, writer_stats.pruned_segments, writer_stats.sealed_segments
+    );
+    eprintln!(
+        "[sporse store diagnostics] reader searched/pruned segments: {}/{} \
+         (sealed={})",
+        reader_stats.searched_segments, reader_stats.pruned_segments, reader_stats.sealed_segments
+    );
+
+    c.bench_function("store_pruning_diagnostics/noop", |b| {
+        b.iter(|| writer_stats.pruned_segments)
+    });
+}
+
+#[cfg(feature = "store")]
 fn ingest_fs(c: &mut Criterion) {
     // The extend() win is invisible on MemoryDirectory (flush is free); on a real
     // filesystem the per-item WAL flush is the cost extend amortizes into one batch
@@ -183,6 +273,6 @@ fn ingest_fs(c: &mut Criterion) {
 }
 
 #[cfg(feature = "store")]
-criterion_group!(g, benches, ingest_fs);
+criterion_group!(g, benches, store_pruning_diagnostics, ingest_fs);
 #[cfg(feature = "store")]
 criterion_main!(g);

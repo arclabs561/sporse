@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-07-03
+
 ### Added
 
 - `postings_bridge` example showing how to convert live weighted `postings`
@@ -29,6 +31,19 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ### Fixed
 
+- Block-Max WAND could drop true top-k results: pivot selection used the
+  current block's maximum as a term's upper bound while skips crossed block
+  boundaries, so a high-weight posting in a later block could be skipped
+  permanently (a document scoring 100.0 could lose to one scoring 0.2, and the
+  long skewed lists of real learned-sparse corpora are exactly the triggering
+  regime). Pivot selection now uses global per-term maxima, the sound classic
+  WAND bound; per-block maxima remain as a scoring-time refinement on the
+  pivot document, so block-max pruning still skips non-competitive scoring.
+  Exactness is pinned by a minimal-counterexample regression test and a
+  multi-block randomized brute-force parity test.
+- Search results are now sorted by score descending (ties by doc id) even when
+  fewer than `k` documents match, on both the writer and reader store paths;
+  previously below-`k` results came back in segment order.
 - `store::UpdatableIndex` now keys its in-memory per-segment cache by segstore's
   stable segment ids instead of `Arc` addresses, avoiding stale WAND indexes
   after compaction/reclaim if the allocator reuses a freed segment address.

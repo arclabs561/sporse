@@ -17,6 +17,8 @@ All notable changes to this project are documented here. Format based on [Keep a
   pruning on a partitioned multi-segment corpus.
 - Added multi-file quantized raw-impact parity coverage against the quantized
   sparse oracle.
+- Added multi-file raw-impact benchmark and diagnostics alongside the
+  single-file raw-impact path.
 
 ### Changed
 

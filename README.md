@@ -14,6 +14,13 @@ The `sae` module also *learns* sparse codes rather than only serving them: a
 Composite-Code Sparse Autoencoder (CCSA, arXiv:2204.07023) encodes dense vectors
 into C-hot composite codes for this same index (the `ccsa_retrieval` example).
 
+## Install
+
+```toml
+[dependencies]
+sporse = "0.6"
+```
+
 ## Usage
 
 ```rust
@@ -69,7 +76,10 @@ cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [
   [`segstore`](https://crates.io/crates/segstore). Per-segment indexes are cached
   and persisted as sidecars, so restart loads finalized posting lists and
   block-max metadata instead of rebuilding unchanged segments. `reader()` returns
-  cloneable checkpoint-visible snapshot views for concurrent searches.
+  cloneable checkpoint-visible snapshot views for concurrent searches. The
+  source sparse-vector segments are still loaded by the current `segstore` open
+  path; fully out-of-core learned-sparse search needs byte-native sparse segment
+  sidecars.
 
 ## References
 

@@ -10,6 +10,14 @@ All notable changes to this project are documented here. Format based on [Keep a
   files, including a diagnostic top-k agreement check against brute force.
 - Added quantized raw-impact recall sweeps across query densities, so the
   byte-backed path is checked beyond one SPLADE-style query shape.
+- Added `store::{UpdatableIndex, UpdatableReader, UpdatableView}::search_with_stats`
+  for segment-level search diagnostics: sealed segments seen, segments searched,
+  segments pruned, and writer-buffer pruning.
+
+### Changed
+
+- Changed store search to skip finite zero-bound segment and buffer indexes
+  before calling per-segment WAND.
 
 ## [0.6.6] - 2026-07-03
 

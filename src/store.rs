@@ -103,6 +103,24 @@ pub struct UpdatableIndex {
     persisted: RefCell<HashSet<u64>>,
 }
 
+/// Segment-level diagnostics for a store search.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StoreSearchStats {
+    /// Sealed segments visible to the search.
+    pub sealed_segments: usize,
+    /// Sealed segment indexes actually searched.
+    pub searched_segments: usize,
+    /// Sealed segment indexes skipped by a finite zero bound or current top-k
+    /// threshold.
+    pub pruned_segments: usize,
+    /// Documents currently in the unflushed writer buffer.
+    pub buffered_docs: usize,
+    /// Whether the unflushed buffer was searched.
+    pub searched_buffer: bool,
+    /// Whether the unflushed buffer had an index but was skipped by bounds.
+    pub pruned_buffer: bool,
+}
+
 /// Cloneable handle for checkpoint-visible snapshot searches.
 ///
 /// A reader sees the state published by [`UpdatableIndex::checkpoint`] or
@@ -250,8 +268,18 @@ impl UpdatableIndex {
 
     /// Top-k documents by Block-Max WAND inner product over the live corpus.
     pub fn search(&self, query: &SparseVec, k: usize) -> Vec<(u32, f32)> {
+        self.search_with_stats(query, k).0
+    }
+
+    /// Top-k search plus segment-level pruning diagnostics.
+    pub fn search_with_stats(
+        &self,
+        query: &SparseVec,
+        k: usize,
+    ) -> (Vec<(u32, f32)>, StoreSearchStats) {
+        let mut stats = StoreSearchStats::default();
         if k == 0 || query.is_empty() {
-            return Vec::new();
+            return (Vec::new(), stats);
         }
 
         let mut cand: Vec<(u32, f32)> = Vec::new();
@@ -259,6 +287,7 @@ impl UpdatableIndex {
         {
             let segs = self.inner.segments();
             let ids = self.inner.segment_ids();
+            stats.sealed_segments = ids.len();
             self.prune_cache_to_current_segments();
             let mut cache = self.cache.borrow_mut();
             let all_cached = ids.iter().all(|id| cache.by_segment_id.contains_key(id));
@@ -285,7 +314,10 @@ impl UpdatableIndex {
                     .collect();
                 order.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
                 for (seg_id, upper_bound) in order {
-                    if cand.len() >= k && upper_bound <= threshold {
+                    if Self::is_finite_zero_bound(upper_bound)
+                        || (cand.len() >= k && upper_bound <= threshold)
+                    {
+                        stats.pruned_segments += 1;
                         continue;
                     }
                     if let Some(idx) = cache
@@ -293,6 +325,7 @@ impl UpdatableIndex {
                         .get(&seg_id)
                         .and_then(|idx| idx.as_ref())
                     {
+                        stats.searched_segments += 1;
                         let results = if cand.len() >= k {
                             idx.search_above(query, k, threshold)
                         } else {
@@ -305,6 +338,14 @@ impl UpdatableIndex {
                 for seg_id in ids {
                     if let Some(idx) = cache.by_segment_id.get(seg_id).and_then(|idx| idx.as_ref())
                     {
+                        let upper_bound = idx.query_upper_bound(query);
+                        if Self::is_finite_zero_bound(upper_bound)
+                            || (cand.len() >= k && upper_bound <= threshold)
+                        {
+                            stats.pruned_segments += 1;
+                            continue;
+                        }
+                        stats.searched_segments += 1;
                         let results = if cand.len() >= k {
                             idx.search_above(query, k, threshold)
                         } else {
@@ -317,20 +358,27 @@ impl UpdatableIndex {
         }
         // The unflushed buffer is bounded by the flush threshold; build it fresh.
         let buffered: Vec<(u32, SparseVec)> = self.inner.buffer().to_vec();
+        stats.buffered_docs = buffered.len();
         if let Some(idx) = self.build_live_index(&buffered) {
-            if cand.len() < k || idx.query_upper_bound(query) > threshold {
+            let upper_bound = idx.query_upper_bound(query);
+            if Self::is_finite_zero_bound(upper_bound) {
+                stats.pruned_buffer = true;
+            } else if cand.len() < k || upper_bound > threshold {
+                stats.searched_buffer = true;
                 let results = if cand.len() >= k {
                     idx.search_above(query, k, threshold)
                 } else {
                     idx.search(query, k)
                 };
                 Self::merge_top_k(&mut cand, results, k);
+            } else {
+                stats.pruned_buffer = true;
             }
         }
         // merge_top_k sorts only once k candidates have accumulated; with
         // fewer than k total matches cand is still in segment order.
         Self::sort_score_desc(&mut cand);
-        cand
+        (cand, stats)
     }
 
     /// The one comparator for merged results: score descending, doc id
@@ -338,6 +386,10 @@ impl UpdatableIndex {
     /// equal-score ordering never depends on segment iteration order.
     fn sort_score_desc(cand: &mut [(u32, f32)]) {
         cand.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    }
+
+    fn is_finite_zero_bound(upper_bound: f32) -> bool {
+        upper_bound.is_finite() && upper_bound <= 0.0
     }
 
     fn prune_cache_to_current_segments(&self) {
@@ -559,18 +611,39 @@ impl UpdatableReader {
     pub fn search(&self, query: &SparseVec, k: usize) -> Vec<(u32, f32)> {
         self.view().search(query, k)
     }
+
+    /// Search the latest checkpoint-published view with segment-level pruning
+    /// diagnostics.
+    pub fn search_with_stats(
+        &self,
+        query: &SparseVec,
+        k: usize,
+    ) -> (Vec<(u32, f32)>, StoreSearchStats) {
+        self.view().search_with_stats(query, k)
+    }
 }
 
 impl UpdatableView {
     /// Top-k documents by Block-Max WAND inner product over this snapshot's live
     /// checkpointed corpus.
     pub fn search(&self, query: &SparseVec, k: usize) -> Vec<(u32, f32)> {
+        self.search_with_stats(query, k).0
+    }
+
+    /// Top-k search over this snapshot plus segment-level pruning diagnostics.
+    pub fn search_with_stats(
+        &self,
+        query: &SparseVec,
+        k: usize,
+    ) -> (Vec<(u32, f32)>, StoreSearchStats) {
+        let mut stats = StoreSearchStats::default();
         if k == 0 || query.is_empty() {
-            return Vec::new();
+            return (Vec::new(), stats);
         }
 
         let segs = self.inner.segments();
         let ids = self.inner.segment_ids();
+        stats.sealed_segments = ids.len();
         let live = |id: &u32| self.inner.is_live(id);
         let segment_keys: Vec<(ReaderCacheKey, usize)> = segs
             .iter()
@@ -625,9 +698,13 @@ impl UpdatableView {
         let mut cand = Vec::new();
         let mut threshold = 0.0f32;
         for (index, upper_bound) in indexes {
-            if cand.len() >= k && upper_bound <= threshold {
+            if UpdatableIndex::is_finite_zero_bound(upper_bound)
+                || (cand.len() >= k && upper_bound <= threshold)
+            {
+                stats.pruned_segments += 1;
                 continue;
             }
+            stats.searched_segments += 1;
             let results = if cand.len() >= k {
                 index.search_above(query, k, threshold)
             } else {
@@ -638,7 +715,7 @@ impl UpdatableView {
         // Same below-k caveat as the writer path: merge_top_k sorts only once
         // k candidates have accumulated, so sort unconditionally here too.
         UpdatableIndex::sort_score_desc(&mut cand);
-        cand
+        (cand, stats)
     }
 }
 
@@ -735,6 +812,49 @@ mod tests {
         );
         assert!((hits[0].1 - 11.0).abs() < 1e-5);
         assert!((hits[1].1 - 10.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn search_with_stats_reports_zero_bound_pruning() {
+        let dir = MemoryDirectory::arc();
+        let mut store = UpdatableIndex::open(dir.clone(), 1).unwrap();
+        store.add(0, sv(&[(0, 10.0)])).unwrap();
+        store.add(1, sv(&[(9, 1.0)])).unwrap();
+        store.checkpoint().unwrap();
+
+        let q = sv(&[(0, 1.0)]);
+        let (hits, stats) = store.search_with_stats(&q, 1);
+        assert_eq!(hits, vec![(0, 10.0)]);
+        assert_eq!(stats.sealed_segments, 2);
+        assert_eq!(stats.searched_segments, 1);
+        assert_eq!(stats.pruned_segments, 1);
+        assert_eq!(stats.buffered_docs, 0);
+
+        let (reader_hits, reader_stats) = store.reader().search_with_stats(&q, 1);
+        assert_eq!(reader_hits, hits);
+        assert_eq!(reader_stats.sealed_segments, 2);
+        assert_eq!(reader_stats.searched_segments, 1);
+        assert_eq!(reader_stats.pruned_segments, 1);
+        assert_eq!(reader_stats.buffered_docs, 0);
+    }
+
+    #[test]
+    fn search_with_stats_reports_zero_bound_buffer_pruning() {
+        let dir = MemoryDirectory::arc();
+        let mut store = UpdatableIndex::open(dir, 2).unwrap();
+        store.add(0, sv(&[(0, 10.0)])).unwrap();
+        store.add(1, sv(&[(1, 1.0)])).unwrap();
+        store.add(2, sv(&[(9, 1.0)])).unwrap();
+
+        let q = sv(&[(0, 1.0)]);
+        let (hits, stats) = store.search_with_stats(&q, 1);
+
+        assert_eq!(hits, vec![(0, 10.0)]);
+        assert_eq!(stats.sealed_segments, 1);
+        assert_eq!(stats.searched_segments, 1);
+        assert_eq!(stats.buffered_docs, 1);
+        assert!(!stats.searched_buffer);
+        assert!(stats.pruned_buffer);
     }
 
     #[test]

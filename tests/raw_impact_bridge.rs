@@ -7,8 +7,10 @@
 //! `SporseIndex` from the segment payload.
 
 use postings::raw::{
-    top_k_weighted_u32_files, write_u64_u32_segment, RawDocument, RawSegmentFile, RawTermId,
+    top_k_weighted_u32_files, top_k_weighted_u32_files_and_index, write_u64_u32_segment,
+    RawDocument, RawSegmentFile, RawTermId,
 };
+use postings::PostingsIndex;
 use sporse::{SparseVec, SporseIndex};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -99,6 +101,39 @@ fn quantized_raw_impacts_match_quantized_sparse_oracle_across_files() {
         assert!(
             got.len() <= 10,
             "query {query_id}: multi-file raw scorer returned more than k results"
+        );
+    }
+}
+
+#[test]
+fn quantized_raw_impacts_match_quantized_sparse_oracle_across_files_and_live_index() {
+    let docs = generated_docs(512, 2_048, 48, 0x517e_11ee);
+    let live_start = docs.len() - 64;
+    let paths = write_raw_impact_files(&docs[..live_start], SCALE, 4);
+    let live_index = build_raw_impact_index(&docs[live_start..], SCALE);
+    let mut files: Vec<_> = paths
+        .iter()
+        .map(|path| RawSegmentFile::open(path.as_path()).unwrap())
+        .collect();
+    let mut segments: Vec<&mut RawSegmentFile> = files.iter_mut().collect();
+
+    let queries = generated_queries(16, 2_048, 16);
+    for (query_id, query) in queries.iter().enumerate() {
+        let expected = top_k_by_score(&docs, query, 10, |query, doc| {
+            quantized_dot(query, doc, SCALE)
+        });
+        let got = top_k_weighted_u32_files_and_index(
+            &mut segments,
+            &live_index,
+            &raw_query(query, SCALE),
+            10,
+        )
+        .unwrap();
+
+        assert_rankings_close(&expected, &got);
+        assert!(
+            got.len() <= 10,
+            "query {query_id}: raw files+live scorer returned more than k results"
         );
     }
 }
@@ -238,6 +273,15 @@ fn write_raw_impact_files(
     docs.chunks(chunk_size)
         .map(|chunk| write_raw_impact_file(chunk, scale))
         .collect()
+}
+
+fn build_raw_impact_index(docs: &[(u32, SparseVec)], scale: f32) -> PostingsIndex<RawTermId, u32> {
+    let mut index = PostingsIndex::new();
+    for (doc_id, vector) in docs {
+        let terms = vector.to_raw_impact_document(scale).unwrap();
+        index.add_weighted_document(*doc_id, &terms).unwrap();
+    }
+    index
 }
 
 fn raw_query(query: &SparseVec, scale: f32) -> Vec<(RawTermId, f32)> {

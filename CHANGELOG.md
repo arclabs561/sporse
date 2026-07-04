@@ -6,6 +6,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ### Added
 
+- Added integration-test parity coverage for quantized raw-impact search across
+  sealed raw files plus one live numeric postings shard.
 - Added raw-impact benchmark coverage for building and sealing a live numeric
   postings shard, and for searching sealed raw files together with that live
   shard.

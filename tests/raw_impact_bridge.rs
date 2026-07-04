@@ -37,13 +37,7 @@ fn quantized_raw_impacts_match_sporse_ranking_for_fixed_point_weights() {
 
     let raw_terms: Vec<Vec<(RawTermId, u32)>> = docs
         .iter()
-        .map(|(_, vector)| {
-            vector
-                .pairs()
-                .iter()
-                .map(|&(dim, weight)| (dim as RawTermId, quantize(weight)))
-                .collect()
-        })
+        .map(|(_, vector)| vector.to_raw_impact_document(SCALE).unwrap())
         .collect();
     let raw_docs: Vec<_> = docs
         .iter()
@@ -56,11 +50,7 @@ fn quantized_raw_impacts_match_sporse_ranking_for_fixed_point_weights() {
     std::fs::write(path.as_path(), bytes).unwrap();
     let mut raw = RawSegmentFile::open(path.as_path()).unwrap();
 
-    let raw_query: Vec<_> = query
-        .pairs()
-        .iter()
-        .map(|&(dim, weight)| (dim as RawTermId, weight / SCALE))
-        .collect();
+    let raw_query = query.to_raw_impact_query(SCALE).unwrap();
     let got = raw.top_k_weighted_u32(&raw_query, 4).unwrap();
 
     assert_rankings_close(&expected, &got);
@@ -214,10 +204,6 @@ fn quantized_raw_impacts_recall_sweep_covers_query_density() {
     }
 }
 
-fn quantize(weight: f32) -> u32 {
-    quantize_with_scale(weight, SCALE)
-}
-
 fn quantize_with_scale(weight: f32, scale: f32) -> u32 {
     assert!(weight.is_finite() && weight >= 0.0);
     let scaled = (weight * scale).round();
@@ -228,13 +214,7 @@ fn quantize_with_scale(weight: f32, scale: f32) -> u32 {
 fn write_raw_impact_file(docs: &[(u32, SparseVec)], scale: f32) -> TempRawPath {
     let raw_terms: Vec<Vec<(RawTermId, u32)>> = docs
         .iter()
-        .map(|(_, vector)| {
-            vector
-                .pairs()
-                .iter()
-                .map(|&(dim, weight)| (dim as RawTermId, quantize_with_scale(weight, scale)))
-                .collect()
-        })
+        .map(|(_, vector)| vector.to_raw_impact_document(scale).unwrap())
         .collect();
     let raw_docs: Vec<_> = docs
         .iter()
@@ -261,11 +241,7 @@ fn write_raw_impact_files(
 }
 
 fn raw_query(query: &SparseVec, scale: f32) -> Vec<(RawTermId, f32)> {
-    query
-        .pairs()
-        .iter()
-        .map(|&(dim, weight)| (dim as RawTermId, weight / scale))
-        .collect()
+    query.to_raw_impact_query(scale).unwrap()
 }
 
 fn quantized_dot(query: &SparseVec, doc: &SparseVec, scale: f32) -> f32 {

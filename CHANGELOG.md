@@ -4,6 +4,12 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- Added a `raw_impact_generation` example showing quantized sparse-vector
+  ingestion into sealed raw files plus one live shard, with a persisted
+  quantizer scale sidecar.
+
 ## [0.6.7] - 2026-07-04
 
 ### Added

@@ -10,6 +10,7 @@ feature ids, weights are non-negative retrieval scores.
 | See how inner-product scores are formed | `basic` | `cargo run --release --example basic` |
 | Convert live weighted postings into sparse vectors | `postings_bridge` | `cargo run --release --example postings_bridge` |
 | Write sparse vectors as raw impact files | `raw_impact_file` | `cargo run --release --example raw_impact_file` |
+| Stream sparse vectors into raw impact generations | `raw_impact_generation` | `cargo run --release --example raw_impact_generation` |
 | Check Block-Max WAND against brute force | `wand_diagnostics` | `cargo run --release --example wand_diagnostics` |
 | Combine sparse and dense retrieval | `hybrid_retrieval` | `cargo run --release --example hybrid_retrieval` |
 | Train sparse codes, then index them | `ccsa_retrieval` | `cargo run --release --example ccsa_retrieval` |
@@ -64,6 +65,10 @@ sporse top-k:   [(2, 8.45), (3, 4.8), (0, 2.6999998)]
 `SparseVec::to_raw_impact_document`, seals a live numeric postings shard to a
 `postings::raw` temp file, then queries that file-backed segment with
 `SparseVec::to_raw_impact_query`.
+
+`raw_impact_generation.rs` extends that boundary to multiple sealed raw files
+plus one live raw postings shard. It writes and reloads the quantizer scale
+sidecar before querying the combined generation.
 
 The example keeps publication, fsync policy, manifests, deletes, and compaction
 outside `sporse`; it only demonstrates the data conversion and raw segment

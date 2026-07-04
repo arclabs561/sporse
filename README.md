@@ -49,6 +49,9 @@ Runnable examples live in [`examples/`](examples/):
   accumulation.
 - `raw_impact_file.rs` writes quantized `SparseVec` impacts to a
   `postings::raw` file segment and queries the file-backed segment.
+- `raw_impact_generation.rs` writes quantized sparse vectors into sealed raw
+  files plus one live shard, reloads the persisted scale sidecar, and queries
+  the combined generation.
 - `wand_diagnostics.rs` checks exact top-k parity against brute force and reports
   how many documents Block-Max WAND scored.
 - `serde_roundtrip.rs` verifies built-index serialization with the `serde`

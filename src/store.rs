@@ -1600,6 +1600,53 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_index_overfetches_all_stale_tombstones_before_filtering() {
+        let dir = MemoryDirectory::arc();
+        let (name, stale_sidecar) = {
+            let mut store = UpdatableIndex::open(dir.clone(), 3).unwrap();
+            store.add(0, sv(&[(0, 100.0)])).unwrap();
+            store.add(1, sv(&[(0, 90.0)])).unwrap();
+            store.add(2, sv(&[(0, 1.0)])).unwrap();
+            store.checkpoint().unwrap();
+            let seg_id = store.inner.segment_ids()[0];
+            let name = store.inner.index_name(seg_id, INDEX_KIND);
+            let bytes = read_file(store.inner.dir(), &name);
+            (name, bytes)
+        };
+        {
+            let mut store = UpdatableIndex::open(dir.clone(), 3).unwrap();
+            store.delete(0).unwrap();
+            store.delete(1).unwrap();
+            store.checkpoint().unwrap();
+            store
+                .inner
+                .dir()
+                .atomic_write(&name, &stale_sidecar)
+                .unwrap();
+        }
+
+        let (watched, opened) = RecordingDirectory::wrap(dir);
+        let snapshot = SnapshotIndex::open(watched).unwrap();
+        assert_eq!(snapshot.tombstone_count(), 2);
+        let hits = snapshot.search(&sv(&[(0, 1.0)]), 1).unwrap();
+        assert_eq!(
+            hits.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
+            vec![2],
+            "lower-scoring live doc must survive stale local top-k filtering"
+        );
+
+        let opened = opened.lock().unwrap().clone();
+        assert!(
+            opened.iter().any(|path| path.starts_with("segstore.idx.")),
+            "snapshot should load the stale sidecar: {opened:?}"
+        );
+        assert!(
+            !opened.iter().any(|path| path.starts_with("segstore.seg.")),
+            "overfetching stale sidecars should avoid source segment reads: {opened:?}"
+        );
+    }
+
+    #[test]
     fn snapshot_index_rebuilds_missing_sidecar_from_one_segment() {
         let dir = MemoryDirectory::arc();
         let (name, _) = checkpointed_store(dir.clone());

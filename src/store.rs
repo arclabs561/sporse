@@ -152,14 +152,21 @@ pub struct UpdatableView {
 ///
 /// This is the restart/query path for larger stores whose built WAND blocks have
 /// already been persisted by [`UpdatableIndex::checkpoint`]. It opens the
-/// segstore manifest without decoding source segments, then applies catalog
-/// tombstones to sidecar results before they enter the global top-k merge. If a
-/// sidecar is missing, stale by recipe, or not decodable, only that source
-/// segment is decoded to rebuild the sidecar.
+/// segstore manifest without decoding source segments, then over-fetches stale
+/// sidecars by their tombstoned-id count and applies catalog tombstones before
+/// results enter the global top-k merge. If a sidecar is missing, stale by
+/// recipe, or not decodable, only that source segment is decoded to rebuild the
+/// sidecar.
 pub struct SnapshotIndex {
     catalog: SegmentCatalog<u32>,
     sidecar_recipe: String,
-    cache: RefCell<HashMap<u64, Option<Arc<SporseIndex>>>>,
+    cache: RefCell<HashMap<u64, Option<SnapshotSegmentIndex>>>,
+}
+
+#[derive(Clone)]
+struct SnapshotSegmentIndex {
+    index: Arc<SporseIndex>,
+    stale_tombstones: usize,
 }
 
 impl UpdatableIndex {
@@ -766,11 +773,11 @@ impl SnapshotIndex {
             let mut indexes = Vec::with_capacity(self.catalog.segment_count());
             for &seg_id in self.catalog.segment_ids() {
                 if let Entry::Vacant(entry) = cache.entry(seg_id) {
-                    let index = self.build_or_load(seg_id)?.map(Arc::new);
+                    let index = self.build_or_load(seg_id)?;
                     entry.insert(index);
                 }
                 if let Some(Some(index)) = cache.get(&seg_id) {
-                    indexes.push((index.clone(), index.query_upper_bound(query)));
+                    indexes.push((index.clone(), index.index.query_upper_bound(query)));
                 }
             }
             indexes
@@ -789,10 +796,11 @@ impl SnapshotIndex {
                 continue;
             }
             stats.searched_segments += 1;
+            let segment_k = k.saturating_add(index.stale_tombstones);
             let results = if cand.len() >= k {
-                index.search_above(query, k, threshold)
+                index.index.search_above(query, segment_k, threshold)
             } else {
-                index.search(query, k)
+                index.index.search(query, segment_k)
             };
             let live_results: Vec<(u32, f32)> = results
                 .into_iter()
@@ -805,7 +813,7 @@ impl SnapshotIndex {
         Ok((cand, stats))
     }
 
-    fn build_or_load(&self, seg_id: u64) -> PersistenceResult<Option<SporseIndex>> {
+    fn build_or_load(&self, seg_id: u64) -> PersistenceResult<Option<SnapshotSegmentIndex>> {
         if let Some(index) = self.load_sidecar(seg_id) {
             return Ok(Some(index));
         }
@@ -814,10 +822,13 @@ impl SnapshotIndex {
         if let Some(index) = &index {
             self.persist_sidecar(index, &segment, seg_id);
         }
-        Ok(index)
+        Ok(index.map(|index| SnapshotSegmentIndex {
+            index: Arc::new(index),
+            stale_tombstones: 0,
+        }))
     }
 
-    fn load_sidecar(&self, seg_id: u64) -> Option<SporseIndex> {
+    fn load_sidecar(&self, seg_id: u64) -> Option<SnapshotSegmentIndex> {
         let name = self.catalog.index_name(seg_id, INDEX_KIND);
         if !self.catalog.dir().exists(&name) {
             return None;
@@ -831,7 +842,18 @@ impl SnapshotIndex {
             .ok()?;
         let index_bytes = UpdatableIndex::decode_sidecar_for_recipe(&self.sidecar_recipe, &bytes)?;
         let sidecar: SporseSidecar = postcard::from_bytes(index_bytes).ok()?;
-        sidecar.index.built.then_some(sidecar.index)
+        if !sidecar.index.built {
+            return None;
+        }
+        let stale_tombstones = sidecar
+            .ids
+            .iter()
+            .filter(|id| !self.catalog.is_live(id))
+            .count();
+        Some(SnapshotSegmentIndex {
+            index: Arc::new(sidecar.index),
+            stale_tombstones,
+        })
     }
 
     fn persist_sidecar(&self, index: &SporseIndex, segment: &[(u32, SparseVec)], seg_id: u64) {
@@ -1558,16 +1580,13 @@ mod tests {
         let (watched, opened) = RecordingDirectory::wrap(dir);
         let snapshot = SnapshotIndex::open(watched).unwrap();
         assert_eq!(snapshot.tombstone_count(), 1);
-        let hits = snapshot.search(&sv(&[(0, 1.0)]), 3).unwrap();
+        let hits = snapshot.search(&sv(&[(0, 1.0)]), 1).unwrap();
         let ids: Vec<u32> = hits.into_iter().map(|(id, _)| id).collect();
         assert!(
             !ids.contains(&0),
             "deleted id must be filtered before merge"
         );
-        assert!(
-            ids.contains(&1),
-            "nearest live doc should remain searchable"
-        );
+        assert_eq!(ids, vec![1], "nearest live doc should remain searchable");
 
         let opened = opened.lock().unwrap().clone();
         assert!(

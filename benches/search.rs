@@ -6,9 +6,11 @@
 /// - Queries: ~50 nonzero dims (also log-normal weights)
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use postings::raw::{
-    top_k_weighted_u32_files, top_k_weighted_u32_files_with_stats,
+    top_k_weighted_u32_files, top_k_weighted_u32_files_and_index,
+    top_k_weighted_u32_files_with_stats, write_u64_u32_segment_from_index_seekable_to,
     write_u64_u32_segment_sorted_from_iter_to, RawDocument, RawSegmentFile, RawTermId,
 };
+use postings::PostingsIndex;
 use sporse::{SparseVec, SporseIndex};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -74,6 +76,8 @@ struct Fixture {
     queries: Vec<SparseVec>,
     raw_path: TempRawPath,
     raw_paths: Vec<TempRawPath>,
+    mixed_raw_paths: Vec<TempRawPath>,
+    live_raw_index: PostingsIndex<RawTermId, u32>,
     raw_queries: Vec<Vec<(RawTermId, f32)>>,
 }
 
@@ -90,6 +94,11 @@ impl Fixture {
             index.insert(id as u32, doc);
         }
         index.build();
+
+        let live_doc_count = docs.len() / 10;
+        let live_start = docs.len() - live_doc_count;
+        let mixed_raw_paths = write_raw_impact_files(&docs[..live_start], 4);
+        let live_raw_index = build_raw_impact_index(&docs[live_start..], live_start as u32);
 
         // Use a different seed for queries so they're independent of corpus.
         let mut qrng = rng ^ 0x1234_5678_9ABC_DEF0;
@@ -109,9 +118,29 @@ impl Fixture {
             queries,
             raw_path,
             raw_paths,
+            mixed_raw_paths,
+            live_raw_index,
             raw_queries,
         }
     }
+}
+
+fn build_raw_impact_index(docs: &[SparseVec], base_doc_id: u32) -> PostingsIndex<RawTermId, u32> {
+    let mut index = PostingsIndex::new();
+    for (doc_offset, doc) in docs.iter().enumerate() {
+        let terms = doc.to_raw_impact_document(IMPACT_SCALE).unwrap();
+        index
+            .add_weighted_document(base_doc_id + doc_offset as u32, &terms)
+            .unwrap();
+    }
+    index
+}
+
+fn write_raw_impact_file_from_index(index: &PostingsIndex<RawTermId, u32>) -> TempRawPath {
+    let path = TempRawPath::new();
+    let mut file = std::fs::File::create(path.as_path()).unwrap();
+    write_u64_u32_segment_from_index_seekable_to(index, &mut file).unwrap();
+    path
 }
 
 fn write_raw_impact_file(docs: &[SparseVec]) -> TempRawPath {
@@ -277,6 +306,17 @@ fn bench_raw_impact_build(c: &mut Criterion) {
         b.iter_with_large_drop(write_partitioned_raw_impact_files);
     });
 
+    group.bench_function("live_index_10k", |b| {
+        b.iter_with_large_drop(|| build_raw_impact_index(criterion::black_box(&docs), 0));
+    });
+
+    let live_index = build_raw_impact_index(&docs, 0);
+    group.bench_function("seal_live_index_10k", |b| {
+        b.iter_with_large_drop(|| {
+            write_raw_impact_file_from_index(criterion::black_box(&live_index))
+        });
+    });
+
     group.finish();
 }
 
@@ -285,6 +325,11 @@ fn bench_search(c: &mut Criterion) {
     let mut raw_segment = RawSegmentFile::open(fixture.raw_path.as_path()).unwrap();
     let mut raw_segments: Vec<RawSegmentFile> = fixture
         .raw_paths
+        .iter()
+        .map(|path| RawSegmentFile::open(path.as_path()).unwrap())
+        .collect();
+    let mut mixed_raw_segments: Vec<RawSegmentFile> = fixture
+        .mixed_raw_paths
         .iter()
         .map(|path| RawSegmentFile::open(path.as_path()).unwrap())
         .collect();
@@ -343,6 +388,30 @@ fn bench_search(c: &mut Criterion) {
                 total_score
             });
         });
+
+        group.bench_with_input(
+            BenchmarkId::new("raw_u32_files_live_top", k),
+            &k,
+            |b, &k| {
+                let mut refs: Vec<&mut RawSegmentFile> = mixed_raw_segments.iter_mut().collect();
+                b.iter(|| {
+                    let mut total_score = 0.0f32;
+                    for q in &fixture.raw_queries {
+                        let results = top_k_weighted_u32_files_and_index(
+                            &mut refs,
+                            &fixture.live_raw_index,
+                            q,
+                            k,
+                        )
+                        .unwrap();
+                        if let Some(&(_, s)) = results.first() {
+                            total_score += s;
+                        }
+                    }
+                    total_score
+                });
+            },
+        );
     }
 
     group.finish();
@@ -368,6 +437,13 @@ fn print_diagnostics(c: &mut Criterion) {
         .collect();
     let mut raw_files_agrees = 0;
     let mut raw_refs: Vec<&mut RawSegmentFile> = raw_segments.iter_mut().collect();
+    let mut mixed_raw_segments: Vec<RawSegmentFile> = fixture
+        .mixed_raw_paths
+        .iter()
+        .map(|path| RawSegmentFile::open(path.as_path()).unwrap())
+        .collect();
+    let mut mixed_raw_refs: Vec<&mut RawSegmentFile> = mixed_raw_segments.iter_mut().collect();
+    let mut raw_files_live_agrees = 0;
     let mut raw_segments_seen = 0usize;
     let mut raw_segments_scored = 0usize;
     let mut raw_segments_pruned = 0usize;
@@ -392,6 +468,13 @@ fn print_diagnostics(c: &mut Criterion) {
         let raw_files_result =
             top_k_weighted_u32_files_with_stats(&mut raw_refs, &fixture.raw_queries[i], k).unwrap();
         let raw_files = raw_files_result.hits;
+        let raw_files_live = top_k_weighted_u32_files_and_index(
+            &mut mixed_raw_refs,
+            &fixture.live_raw_index,
+            &fixture.raw_queries[i],
+            k,
+        )
+        .unwrap();
         raw_segments_seen += raw_files_result.stats.segments_seen;
         raw_segments_scored += raw_files_result.stats.segments_scored;
         raw_segments_pruned += raw_files_result.stats.segments_pruned;
@@ -408,6 +491,11 @@ fn print_diagnostics(c: &mut Criterion) {
         let raw_files_ids: std::collections::HashSet<u32> = raw_files.iter().map(|r| r.0).collect();
         if raw_files_ids == bf_ids {
             raw_files_agrees += 1;
+        }
+        let raw_files_live_ids: std::collections::HashSet<u32> =
+            raw_files_live.iter().map(|r| r.0).collect();
+        if raw_files_live_ids == bf_ids {
+            raw_files_live_agrees += 1;
         }
         total_iterations += stats.iterations;
         total_scored += stats.docs_scored;
@@ -461,6 +549,10 @@ fn print_diagnostics(c: &mut Criterion) {
     eprintln!(
         "[sporse diagnostics] quantized raw u32 files top-{k} agrees with brute force: {}/{} queries",
         raw_files_agrees, n_check
+    );
+    eprintln!(
+        "[sporse diagnostics] quantized raw u32 files+live top-{k} agrees with brute force: {}/{} queries",
+        raw_files_live_agrees, n_check
     );
     eprintln!(
         "[sporse diagnostics] Index: {} docs, {} vocab dims, ~{DOC_NNZ} nnz/doc, ~{QUERY_NNZ} nnz/query",

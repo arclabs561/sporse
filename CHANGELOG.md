@@ -6,6 +6,9 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ### Added
 
+- Added raw-impact benchmark coverage for building and sealing a live numeric
+  postings shard, and for searching sealed raw files together with that live
+  shard.
 - Added search benchmark coverage for quantized `postings::raw` u32 impact
   files, including a diagnostic top-k agreement check against brute force.
 - Added quantized raw-impact recall sweeps across query densities, so the

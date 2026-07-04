@@ -59,3 +59,7 @@ name = "hybrid_retrieval"
 [[example]]
 name = "serde_roundtrip"
 required-features = ["serde"]
+
+[[example]]
+name = "store_reopen_diagnostics"
+required-features = ["store"]

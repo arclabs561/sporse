@@ -6,6 +6,9 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ### Added
 
+- Added a `store_reopen_diagnostics` example that measures the
+  `store::SnapshotIndex` sidecar-first reader path versus rebuilding missing
+  per-segment WAND sidecars from source sparse-vector segments.
 - Added a `raw_impact_generation` example showing quantized sparse-vector
   ingestion into sealed raw files plus one live shard, with a persisted
   quantizer scale sidecar.

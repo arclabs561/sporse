@@ -95,6 +95,10 @@ cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [
   weights are `f32`. The current test suite covers recall sweeps across scales
   and query densities, but that path is not public storage API yet.
 
+For store restart measurement, `cargo run --release --features store --example store_reopen_diagnostics`
+prints first snapshot-query cost with persisted WAND sidecars present versus
+after deleting those sidecars and forcing source-segment rebuilds.
+
 For search-quality and pruning measurements, run:
 
 ```sh

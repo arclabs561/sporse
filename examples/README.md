@@ -11,6 +11,7 @@ feature ids, weights are non-negative retrieval scores.
 | Convert live weighted postings into sparse vectors | `postings_bridge` | `cargo run --release --example postings_bridge` |
 | Write sparse vectors as raw impact files | `raw_impact_file` | `cargo run --release --example raw_impact_file` |
 | Stream sparse vectors into raw impact generations | `raw_impact_generation` | `cargo run --release --example raw_impact_generation` |
+| Measure store snapshot sidecars | `store_reopen_diagnostics` | `cargo run --release --features store --example store_reopen_diagnostics` |
 | Check Block-Max WAND against brute force | `wand_diagnostics` | `cargo run --release --example wand_diagnostics` |
 | Combine sparse and dense retrieval | `hybrid_retrieval` | `cargo run --release --example hybrid_retrieval` |
 | Train sparse codes, then index them | `ccsa_retrieval` | `cargo run --release --example ccsa_retrieval` |
@@ -79,6 +80,28 @@ Output excerpt:
 ```text
 top-k from postings::raw:
   doc 101: 5.120  learned sparse retrieval
+```
+
+## Store Diagnostics
+
+`store_reopen_diagnostics.rs` builds a checkpointed segmented WAND store, opens
+the read-only `SnapshotIndex`, then compares the first query with persisted
+sidecars against the same query after deleting sidecars and rebuilding from
+source sparse-vector segments.
+
+```sh
+cargo run --release --features store --example store_reopen_diagnostics
+```
+
+```text
+documents: 1000, segments: 5, flush threshold: 200
+sidecars loaded path: 5
+sidecars rebuild path before/after delete: 5/0
+first snapshot query with sidecars: 257 us
+first snapshot query after deleting sidecars: 1246 us
+with sidecars searched/pruned segments: 1/4
+after rebuild searched/pruned segments: 1/4
+top hit: Some((37, 320.0))
 ```
 
 ## WAND Diagnostics

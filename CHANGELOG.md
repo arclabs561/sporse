@@ -39,6 +39,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ### Changed
 
+- Changed raw-impact dev/bench coverage to use `postings` 0.2.11, exercising
+  live-seeded sealed-file pruning in files-plus-live searches.
 - Changed `SparseVec::new` to sum duplicate dimensions deterministically instead
   of keeping one duplicate after sorting.
 - Changed store search to skip finite zero-bound segment and buffer indexes

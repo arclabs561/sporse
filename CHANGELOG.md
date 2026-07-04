@@ -6,6 +6,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ### Added
 
+- Added `RawImpactQuantizer` as a checked raw-impact scale value for encoding
+  document and query impacts with the same persisted scale.
 - Added integration-test parity coverage for quantized raw-impact search across
   sealed raw files plus one live numeric postings shard.
 - Added raw-impact benchmark coverage for building and sealing a live numeric

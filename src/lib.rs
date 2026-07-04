@@ -82,6 +82,38 @@ impl fmt::Display for RawImpactError {
 
 impl std::error::Error for RawImpactError {}
 
+/// Quantization policy for writing `SparseVec` weights as raw impacts.
+///
+/// Persist the scale value beside a raw impact generation and reload it with
+/// [`RawImpactQuantizer::new`] before encoding queries for that generation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RawImpactQuantizer {
+    scale: f32,
+}
+
+impl RawImpactQuantizer {
+    /// Create a quantizer from a finite positive scale.
+    pub fn new(scale: f32) -> Result<Self, RawImpactError> {
+        validate_raw_impact_scale(scale)?;
+        Ok(Self { scale })
+    }
+
+    /// The scale used to convert `f32` weights to `u32` impacts.
+    pub fn scale(self) -> f32 {
+        self.scale
+    }
+
+    /// Quantize a document vector for `postings::raw`.
+    pub fn document(self, vector: &SparseVec) -> Result<Vec<(u64, u32)>, RawImpactError> {
+        vector.to_raw_impact_document(self.scale)
+    }
+
+    /// Rescale a query vector for documents written by this quantizer.
+    pub fn query(self, vector: &SparseVec) -> Result<Vec<(u64, f32)>, RawImpactError> {
+        vector.to_raw_impact_query(self.scale)
+    }
+}
+
 // ── SparseVec ────────────────────────────────────────────────────────────────
 
 /// A sparse vector: sorted list of (dimension, weight) pairs.
@@ -618,6 +650,26 @@ mod tests {
         assert!((query[0].1 - 0.0025).abs() < 1e-8);
         assert_eq!(query[1].0, 3);
         assert!((query[1].1 - 0.015).abs() < 1e-8);
+    }
+
+    #[test]
+    fn raw_impact_quantizer_carries_scale_for_documents_and_queries() {
+        let quantizer = RawImpactQuantizer::new(100.0).unwrap();
+        let sv = SparseVec::new(vec![(3, 1.25), (1, 0.25), (3, 0.25)]);
+
+        assert_eq!(quantizer.scale(), 100.0);
+        assert_eq!(
+            quantizer.document(&sv).unwrap(),
+            sv.to_raw_impact_document(100.0).unwrap()
+        );
+        assert_eq!(
+            quantizer.query(&sv).unwrap(),
+            sv.to_raw_impact_query(100.0).unwrap()
+        );
+        assert_eq!(
+            RawImpactQuantizer::new(0.0).unwrap_err(),
+            RawImpactError::InvalidScale { scale: 0.0 }
+        );
     }
 
     #[test]

@@ -83,9 +83,11 @@ cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [
   `store::SnapshotIndex` opens the last checkpoint manifest and queries sidecars
   first, so source sparse-vector batches are read only when a sidecar is missing
   or unusable. Fully out-of-core learned-sparse search needs byte-native sparse
-  segment sidecars. `SparseVec::to_raw_impact_document` and
-  `SparseVec::to_raw_impact_query` produce quantized impact pairs that callers
-  can write to `postings::raw` without `sporse` owning the file lifecycle.
+  segment sidecars. `RawImpactQuantizer` carries the scale callers persist with
+  a raw impact generation, and `SparseVec::to_raw_impact_document` /
+  `SparseVec::to_raw_impact_query` remain available for direct conversion.
+  Callers write those pairs to `postings::raw` without `sporse` owning the file
+  lifecycle.
   `postings::raw` covers `u32` impact-score segments, while native `SparseVec`
   weights are `f32`. The current test suite covers recall sweeps across scales
   and query densities, but that path is not public storage API yet.

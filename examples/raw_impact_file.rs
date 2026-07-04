@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use postings::raw::{write_u64_u32_segment_from_index_seekable_to, RawSegmentFile};
 use postings::PostingsIndex;
-use sporse::SparseVec;
+use sporse::{RawImpactQuantizer, SparseVec};
 
 const SCALE: f32 = 100.0;
 
@@ -40,9 +40,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     ];
 
+    let quantizer = RawImpactQuantizer::new(SCALE)?;
     let mut live_shard = PostingsIndex::new();
     for doc in &docs {
-        let terms = doc.vector.to_raw_impact_document(SCALE)?;
+        let terms = quantizer.document(&doc.vector)?;
         live_shard.add_weighted_document(doc.id, &terms)?;
     }
 
@@ -53,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(file);
 
     let query = SparseVec::new(vec![(10, 1.5), (20, 1.0), (30, 0.8)]);
-    let raw_query = query.to_raw_impact_query(SCALE)?;
+    let raw_query = quantizer.query(&query)?;
     let mut segment = RawSegmentFile::open(temp.path())?;
     let hits = segment.top_k_weighted_u32(&raw_query, 3)?;
 

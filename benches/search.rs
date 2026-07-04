@@ -258,6 +258,28 @@ fn bench_build(c: &mut Criterion) {
     });
 }
 
+fn bench_raw_impact_build(c: &mut Criterion) {
+    let mut rng = BENCH_SEED;
+    let docs: Vec<SparseVec> = (0..N_DOCS)
+        .map(|_| gen_sparse(&mut rng, VOCAB, DOC_NNZ))
+        .collect();
+    let mut group = c.benchmark_group("raw_impact_build");
+
+    group.bench_function("single_file_10k", |b| {
+        b.iter_with_large_drop(|| write_raw_impact_file(criterion::black_box(&docs)));
+    });
+
+    group.bench_function("files_4_10k", |b| {
+        b.iter_with_large_drop(|| write_raw_impact_files(criterion::black_box(&docs), 4));
+    });
+
+    group.bench_function("partitioned_files_2k", |b| {
+        b.iter_with_large_drop(write_partitioned_raw_impact_files);
+    });
+
+    group.finish();
+}
+
 fn bench_search(c: &mut Criterion) {
     let fixture = Fixture::build();
     let mut raw_segment = RawSegmentFile::open(fixture.raw_path.as_path()).unwrap();
@@ -464,6 +486,6 @@ fn print_diagnostics(c: &mut Criterion) {
 criterion_group!(
     name = benches;
     config = Criterion::default().sample_size(20);
-    targets = bench_build, bench_search, print_diagnostics
+    targets = bench_build, bench_raw_impact_build, bench_search, print_diagnostics
 );
 criterion_main!(benches);

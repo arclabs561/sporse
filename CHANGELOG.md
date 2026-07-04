@@ -21,6 +21,8 @@ All notable changes to this project are documented here. Format based on [Keep a
   single-file raw-impact path.
 - Added raw-impact multi-file segment-pruning counts to the search diagnostics
   benchmark, including a partitioned fixture that exercises segment pruning.
+- Added raw-impact file-build benchmarks for single-file, multi-file, and
+  partitioned segment construction policies.
 - Added `store::SnapshotIndex`, a read-only checkpoint view that opens
   segstore's manifest and queries persisted per-segment WAND sidecars before
   falling back to one source sparse-vector segment decode on a sidecar miss.

@@ -19,6 +19,8 @@ All notable changes to this project are documented here. Format based on [Keep a
   sparse oracle.
 - Added multi-file raw-impact benchmark and diagnostics alongside the
   single-file raw-impact path.
+- Added raw-impact multi-file segment-pruning counts to the search diagnostics
+  benchmark.
 - Added `store::SnapshotIndex`, a read-only checkpoint view that opens
   segstore's manifest and queries persisted per-segment WAND sidecars before
   falling back to one source sparse-vector segment decode on a sidecar miss.

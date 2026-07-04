@@ -6,8 +6,8 @@
 /// - Queries: ~50 nonzero dims (also log-normal weights)
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use postings::raw::{
-    top_k_weighted_u32_files, write_u64_u32_segment_sorted_from_iter_to, RawDocument,
-    RawSegmentFile, RawTermId,
+    top_k_weighted_u32_files, top_k_weighted_u32_files_with_stats,
+    write_u64_u32_segment_sorted_from_iter_to, RawDocument, RawSegmentFile, RawTermId,
 };
 use sporse::{SparseVec, SporseIndex};
 use std::path::PathBuf;
@@ -295,6 +295,9 @@ fn print_diagnostics(c: &mut Criterion) {
         .collect();
     let mut raw_files_agrees = 0;
     let mut raw_refs: Vec<&mut RawSegmentFile> = raw_segments.iter_mut().collect();
+    let mut raw_segments_seen = 0usize;
+    let mut raw_segments_scored = 0usize;
+    let mut raw_segments_pruned = 0usize;
 
     for (i, q) in fixture.queries.iter().take(n_check).enumerate() {
         let (wand, stats) = fixture.index.search_with_stats(q, k);
@@ -302,8 +305,12 @@ fn print_diagnostics(c: &mut Criterion) {
         let raw = raw_segment
             .top_k_weighted_u32(&fixture.raw_queries[i], k)
             .unwrap();
-        let raw_files =
-            top_k_weighted_u32_files(&mut raw_refs, &fixture.raw_queries[i], k).unwrap();
+        let raw_files_result =
+            top_k_weighted_u32_files_with_stats(&mut raw_refs, &fixture.raw_queries[i], k).unwrap();
+        let raw_files = raw_files_result.hits;
+        raw_segments_seen += raw_files_result.stats.segments_seen;
+        raw_segments_scored += raw_files_result.stats.segments_scored;
+        raw_segments_pruned += raw_files_result.stats.segments_pruned;
 
         let wand_ids: std::collections::HashSet<u32> = wand.iter().map(|r| r.0).collect();
         let bf_ids: std::collections::HashSet<u32> = bf.iter().map(|r| r.0).collect();
@@ -332,6 +339,9 @@ fn print_diagnostics(c: &mut Criterion) {
     } else {
         0.0
     };
+    let avg_raw_seen = raw_segments_seen as f64 / n_check as f64;
+    let avg_raw_scored = raw_segments_scored as f64 / n_check as f64;
+    let avg_raw_pruned = raw_segments_pruned as f64 / n_check as f64;
     // WAND efficiency: fraction of the 10K collection actually scored
     let scored_frac = 100.0 * avg_scored as f64 / N_DOCS as f64;
 
@@ -357,6 +367,9 @@ fn print_diagnostics(c: &mut Criterion) {
     eprintln!("  docs scored: {avg_scored} ({scored_frac:.1}% of collection)");
     eprintln!("  cursor skips (advance_to calls): {avg_skips}");
     eprintln!("  advance_to calls per iteration: {advances_per_iter:.2}");
+    eprintln!(
+        "  raw files searched/pruned segments: {avg_raw_scored:.1}/{avg_raw_pruned:.1} of {avg_raw_seen:.1}"
+    );
 
     // Dummy bench so criterion doesn't complain about an unused group
     c.bench_function("diagnostics_noop", |b| b.iter(|| 0u64));

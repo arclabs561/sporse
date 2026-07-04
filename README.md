@@ -92,6 +92,16 @@ cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [
   weights are `f32`. The current test suite covers recall sweeps across scales
   and query densities, but that path is not public storage API yet.
 
+For search-quality and pruning measurements, run:
+
+```sh
+cargo bench --bench search -- diagnostics_noop --warm-up-time 0.1 --measurement-time 0.1 --sample-size 10
+```
+
+The diagnostic pass checks WAND, raw-file, multi-file raw, and files-plus-live
+raw top-k parity against brute force, then prints average documents scored,
+cursor skips, and raw segment pruning counts.
+
 ## References
 
 - Broder, Carmel, Herscovici, Soffer, and Zien, "Efficient Query Evaluation

@@ -28,6 +28,8 @@ All notable changes to this project are documented here. Format based on [Keep a
   before calling per-segment WAND.
 - Changed cold store writer searches to order sealed segments by query upper
   bound immediately after loading or building per-segment indexes.
+- Changed store writer searches to build the temporary writer-buffer index from
+  the buffer slice instead of cloning buffered sparse vectors first.
 - Changed raw-impact benchmark setup to stream sorted postings raw documents
   directly to temp files instead of building a full raw segment byte vector
   before writing.

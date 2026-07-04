@@ -334,9 +334,9 @@ impl UpdatableIndex {
             }
         }
         // The unflushed buffer is bounded by the flush threshold; build it fresh.
-        let buffered: Vec<(u32, SparseVec)> = self.inner.buffer().to_vec();
+        let buffered = self.inner.buffer();
         stats.buffered_docs = buffered.len();
-        if let Some(idx) = self.build_live_index(&buffered) {
+        if let Some(idx) = self.build_live_index(buffered) {
             let upper_bound = idx.query_upper_bound(query);
             if Self::is_finite_zero_bound(upper_bound) {
                 stats.pruned_buffer = true;

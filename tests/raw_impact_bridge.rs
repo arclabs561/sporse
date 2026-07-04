@@ -7,8 +7,9 @@
 //! `SporseIndex` from the segment payload.
 
 use postings::raw::{
-    top_k_weighted_u32_files, top_k_weighted_u32_files_and_index, write_u64_u32_segment,
-    RawDocument, RawSegmentFile, RawTermId,
+    top_k_weighted_u32_files, top_k_weighted_u32_files_and_index,
+    top_k_weighted_u32_files_filtered, write_u64_u32_segment, RawDocument, RawSegmentFile,
+    RawTermId,
 };
 use postings::PostingsIndex;
 use sporse::{SparseVec, SporseIndex};
@@ -136,6 +137,38 @@ fn quantized_raw_impacts_match_quantized_sparse_oracle_across_files_and_live_ind
             "query {query_id}: raw files+live scorer returned more than k results"
         );
     }
+}
+
+#[test]
+fn quantized_raw_impacts_apply_visibility_before_segment_top_k() {
+    let docs = vec![
+        (0, SparseVec::new(vec![(0, 100.0)])),
+        (1, SparseVec::new(vec![(0, 90.0)])),
+        (2, SparseVec::new(vec![(0, 1.0)])),
+        (10, SparseVec::new(vec![(0, 0.5)])),
+    ];
+    let visible = |doc_id| doc_id != 0 && doc_id != 1;
+    let paths = write_raw_impact_files(&docs, SCALE, 2);
+    let mut files: Vec<_> = paths
+        .iter()
+        .map(|path| RawSegmentFile::open(path.as_path()).unwrap())
+        .collect();
+    let mut segments: Vec<&mut RawSegmentFile> = files.iter_mut().collect();
+    let query = SparseVec::new(vec![(0, 1.0)]);
+    let visible_docs: Vec<_> = docs
+        .iter()
+        .filter(|(doc_id, _)| visible(*doc_id))
+        .cloned()
+        .collect();
+    let expected = top_k_by_score(&visible_docs, &query, 1, |query, doc| {
+        quantized_dot(query, doc, SCALE)
+    });
+
+    let got =
+        top_k_weighted_u32_files_filtered(&mut segments, &raw_query(&query, SCALE), 1, visible)
+            .unwrap();
+
+    assert_rankings_close(&expected, &got);
 }
 
 #[test]

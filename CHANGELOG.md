@@ -12,6 +12,9 @@ All notable changes to this project are documented here. Format based on [Keep a
 - Added a `raw_impact_generation` example showing quantized sparse-vector
   ingestion into sealed raw files plus one live shard, with a persisted
   quantizer scale sidecar.
+- Added raw-impact visibility filtering coverage over `postings` 0.2.12, so
+  tombstone or newer-version masks are applied before sealed-file local top-k
+  truncation.
 
 ## [0.6.7] - 2026-07-04
 
@@ -52,7 +55,7 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ### Changed
 
-- Changed raw-impact dev/bench coverage to use `postings` 0.2.11, exercising
+- Changed raw-impact dev/bench coverage to use `postings` 0.2.12, exercising
   live-seeded sealed-file pruning in files-plus-live searches.
 - Changed `SparseVec::new` to sum duplicate dimensions deterministically instead
   of keeping one duplicate after sorting.

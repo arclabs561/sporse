@@ -79,10 +79,11 @@ cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [
   and persisted as sidecars, so restart loads finalized posting lists and
   block-max metadata instead of rebuilding unchanged segments. `reader()` returns
   cloneable checkpoint-visible snapshot views for concurrent searches, and
-  `search_with_stats` reports segment-level pruning diagnostics. The
-  source sparse-vector segments are still loaded by the current `segstore` open
-  path; fully out-of-core learned-sparse search needs byte-native sparse segment
-  sidecars. `SparseVec::to_raw_impact_document` and
+  `search_with_stats` reports segment-level pruning diagnostics.
+  `store::SnapshotIndex` opens the last checkpoint manifest and queries sidecars
+  first, so source sparse-vector batches are read only when a sidecar is missing
+  or unusable. Fully out-of-core learned-sparse search needs byte-native sparse
+  segment sidecars. `SparseVec::to_raw_impact_document` and
   `SparseVec::to_raw_impact_query` produce quantized impact pairs that callers
   can write to `postings::raw` without `sporse` owning the file lifecycle.
   `postings::raw` covers `u32` impact-score segments, while native `SparseVec`

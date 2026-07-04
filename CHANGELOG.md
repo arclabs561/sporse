@@ -19,6 +19,9 @@ All notable changes to this project are documented here. Format based on [Keep a
   sparse oracle.
 - Added multi-file raw-impact benchmark and diagnostics alongside the
   single-file raw-impact path.
+- Added `store::SnapshotIndex`, a read-only checkpoint view that opens
+  segstore's manifest and queries persisted per-segment WAND sidecars before
+  falling back to one source sparse-vector segment decode on a sidecar miss.
 - Added `SparseVec::to_raw_impact_document` and
   `SparseVec::to_raw_impact_query` for zero-dependency quantized-impact pairs
   that callers can write to `postings::raw`.
@@ -38,6 +41,9 @@ All notable changes to this project are documented here. Format based on [Keep a
 - Changed raw-impact benchmark setup to stream sorted postings raw documents
   directly to temp files instead of building a full raw segment byte vector
   before writing.
+- The `store` feature now requires `segstore = "0.4.1"` for manifest-only
+  snapshot reads. This remains fully optional; default builds do not depend on
+  the storage stack.
 
 ## [0.6.6] - 2026-07-03
 

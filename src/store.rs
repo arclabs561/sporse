@@ -19,12 +19,13 @@
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
 use durability::{Directory, PersistenceResult};
-use segstore::{Reader as SegReader, SegmentedStore, Store, View as SegView};
+use segstore::{Reader as SegReader, SegmentCatalog, SegmentedStore, Store, View as SegView};
 
 use crate::{posting::BLOCK_SIZE, SparseVec, SporseIndex};
 
@@ -144,6 +145,21 @@ pub struct UpdatableView {
     dir: Arc<dyn Directory>,
     sidecar_recipe: Arc<str>,
     cache: Arc<Mutex<ReaderCache>>,
+}
+
+/// A read-only checkpoint view that loads per-segment WAND sidecars before
+/// falling back to source sparse-vector segment payloads.
+///
+/// This is the restart/query path for larger stores whose built WAND blocks have
+/// already been persisted by [`UpdatableIndex::checkpoint`]. It opens the
+/// segstore manifest without decoding source segments, then applies catalog
+/// tombstones to sidecar results before they enter the global top-k merge. If a
+/// sidecar is missing, stale by recipe, or not decodable, only that source
+/// segment is decoded to rebuild the sidecar.
+pub struct SnapshotIndex {
+    catalog: SegmentCatalog<u32>,
+    sidecar_recipe: String,
+    cache: RefCell<HashMap<u64, Option<Arc<SporseIndex>>>>,
 }
 
 impl UpdatableIndex {
@@ -505,7 +521,11 @@ impl UpdatableIndex {
     }
 
     fn encode_sidecar(&self, index: &[u8]) -> Option<Vec<u8>> {
-        let recipe = self.sidecar_recipe.as_bytes();
+        Self::encode_sidecar_for_recipe(&self.sidecar_recipe, index)
+    }
+
+    fn encode_sidecar_for_recipe(sidecar_recipe: &str, index: &[u8]) -> Option<Vec<u8>> {
+        let recipe = sidecar_recipe.as_bytes();
         let recipe_len = u32::try_from(recipe.len()).ok()?;
         let mut bytes = Vec::with_capacity(16 + recipe.len() + index.len());
         bytes.extend_from_slice(SIDECAR_MAGIC);
@@ -696,13 +716,213 @@ impl UpdatableView {
     }
 }
 
+impl SnapshotIndex {
+    /// Open the last checkpoint under `dir` as a read-only learned-sparse search
+    /// snapshot.
+    ///
+    /// WAL records after the last checkpoint are intentionally not visible;
+    /// checkpoint before opening a snapshot when newly added documents must be
+    /// searchable through this path.
+    pub fn open(dir: Arc<dyn Directory>) -> PersistenceResult<Self> {
+        Ok(Self {
+            catalog: SegmentCatalog::open(dir)?,
+            sidecar_recipe: UpdatableIndex::make_sidecar_recipe(),
+            cache: RefCell::new(HashMap::new()),
+        })
+    }
+
+    /// Number of checkpointed immutable segments in this snapshot.
+    pub fn segment_count(&self) -> usize {
+        self.catalog.segment_count()
+    }
+
+    /// Number of tombstoned document ids in this snapshot.
+    pub fn tombstone_count(&self) -> usize {
+        self.catalog.tombstone_count()
+    }
+
+    /// Top-k documents by Block-Max WAND inner product over the live
+    /// checkpointed corpus.
+    pub fn search(&self, query: &SparseVec, k: usize) -> PersistenceResult<Vec<(u32, f32)>> {
+        Ok(self.search_with_stats(query, k)?.0)
+    }
+
+    /// Top-k search plus segment-level pruning diagnostics.
+    pub fn search_with_stats(
+        &self,
+        query: &SparseVec,
+        k: usize,
+    ) -> PersistenceResult<(Vec<(u32, f32)>, StoreSearchStats)> {
+        let mut stats = StoreSearchStats::default();
+        if k == 0 || query.is_empty() {
+            return Ok((Vec::new(), stats));
+        }
+
+        let mut indexes = {
+            let mut cache = self.cache.borrow_mut();
+            let current: HashSet<u64> = self.catalog.segment_ids().iter().copied().collect();
+            cache.retain(|seg_id, _| current.contains(seg_id));
+
+            let mut indexes = Vec::with_capacity(self.catalog.segment_count());
+            for &seg_id in self.catalog.segment_ids() {
+                if let Entry::Vacant(entry) = cache.entry(seg_id) {
+                    let index = self.build_or_load(seg_id)?.map(Arc::new);
+                    entry.insert(index);
+                }
+                if let Some(Some(index)) = cache.get(&seg_id) {
+                    indexes.push((index.clone(), index.query_upper_bound(query)));
+                }
+            }
+            indexes
+        };
+
+        stats.sealed_segments = self.catalog.segment_count();
+        indexes.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+
+        let mut cand = Vec::new();
+        let mut threshold = 0.0f32;
+        for (index, upper_bound) in indexes {
+            if UpdatableIndex::is_finite_zero_bound(upper_bound)
+                || (cand.len() >= k && upper_bound <= threshold)
+            {
+                stats.pruned_segments += 1;
+                continue;
+            }
+            stats.searched_segments += 1;
+            let results = if cand.len() >= k {
+                index.search_above(query, k, threshold)
+            } else {
+                index.search(query, k)
+            };
+            let live_results: Vec<(u32, f32)> = results
+                .into_iter()
+                .filter(|(id, _)| self.catalog.is_live(id))
+                .collect();
+            threshold = UpdatableIndex::merge_top_k(&mut cand, live_results, k);
+        }
+
+        UpdatableIndex::sort_score_desc(&mut cand);
+        Ok((cand, stats))
+    }
+
+    fn build_or_load(&self, seg_id: u64) -> PersistenceResult<Option<SporseIndex>> {
+        if let Some(index) = self.load_sidecar(seg_id) {
+            return Ok(Some(index));
+        }
+        let segment: Vec<(u32, SparseVec)> = self.catalog.read_segment(seg_id)?;
+        let index = UpdatableIndex::build_live_index_from(&segment, &|id| self.catalog.is_live(id));
+        if let Some(index) = &index {
+            self.persist_sidecar(index, &segment, seg_id);
+        }
+        Ok(index)
+    }
+
+    fn load_sidecar(&self, seg_id: u64) -> Option<SporseIndex> {
+        let name = self.catalog.index_name(seg_id, INDEX_KIND);
+        if !self.catalog.dir().exists(&name) {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        self.catalog
+            .dir()
+            .open_file(&name)
+            .ok()?
+            .read_to_end(&mut bytes)
+            .ok()?;
+        let index_bytes = UpdatableIndex::decode_sidecar_for_recipe(&self.sidecar_recipe, &bytes)?;
+        let sidecar: SporseSidecar = postcard::from_bytes(index_bytes).ok()?;
+        sidecar.index.built.then_some(sidecar.index)
+    }
+
+    fn persist_sidecar(&self, index: &SporseIndex, segment: &[(u32, SparseVec)], seg_id: u64) {
+        let sidecar = SporseSidecar {
+            index: index.clone(),
+            ids: UpdatableIndex::live_ids_vec_from(segment, &|id| self.catalog.is_live(id)),
+        };
+        if let Ok(index_bytes) = postcard::to_allocvec(&sidecar) {
+            let Some(bytes) =
+                UpdatableIndex::encode_sidecar_for_recipe(&self.sidecar_recipe, &index_bytes)
+            else {
+                return;
+            };
+            let _ = self
+                .catalog
+                .dir()
+                .atomic_write(&self.catalog.index_name(seg_id, INDEX_KIND), &bytes);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use durability::MemoryDirectory;
+    use std::io::Write;
+    use std::path::PathBuf;
 
     fn sv(pairs: &[(u32, f32)]) -> SparseVec {
         SparseVec::new(pairs.to_vec())
+    }
+
+    struct RecordingDirectory {
+        inner: Arc<dyn Directory>,
+        opened: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingDirectory {
+        fn wrap(inner: Arc<dyn Directory>) -> (Arc<dyn Directory>, Arc<Mutex<Vec<String>>>) {
+            let opened = Arc::new(Mutex::new(Vec::new()));
+            (
+                Arc::new(Self {
+                    inner,
+                    opened: opened.clone(),
+                }),
+                opened,
+            )
+        }
+    }
+
+    impl Directory for RecordingDirectory {
+        fn create_file(&self, path: &str) -> PersistenceResult<Box<dyn Write + Send>> {
+            self.inner.create_file(path)
+        }
+
+        fn open_file(&self, path: &str) -> PersistenceResult<Box<dyn Read + Send>> {
+            self.opened.lock().unwrap().push(path.to_string());
+            self.inner.open_file(path)
+        }
+
+        fn exists(&self, path: &str) -> bool {
+            self.inner.exists(path)
+        }
+
+        fn delete(&self, path: &str) -> PersistenceResult<()> {
+            self.inner.delete(path)
+        }
+
+        fn atomic_rename(&self, from: &str, to: &str) -> PersistenceResult<()> {
+            self.inner.atomic_rename(from, to)
+        }
+
+        fn create_dir_all(&self, path: &str) -> PersistenceResult<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn list_dir(&self, path: &str) -> PersistenceResult<Vec<String>> {
+            self.inner.list_dir(path)
+        }
+
+        fn append_file(&self, path: &str) -> PersistenceResult<Box<dyn Write + Send>> {
+            self.inner.append_file(path)
+        }
+
+        fn atomic_write(&self, path: &str, data: &[u8]) -> PersistenceResult<()> {
+            self.inner.atomic_write(path, data)
+        }
+
+        fn file_path(&self, path: &str) -> Option<PathBuf> {
+            self.inner.file_path(path)
+        }
     }
 
     fn read_file(dir: &Arc<dyn Directory>, name: &str) -> Vec<u8> {
@@ -1284,6 +1504,104 @@ mod tests {
         assert!(
             top.contains(&1),
             "rewritten sidecar should keep live ids from the segment"
+        );
+    }
+
+    #[test]
+    fn snapshot_index_queries_sidecars_without_opening_segment_payloads() {
+        let dir = MemoryDirectory::arc();
+        {
+            let mut store = UpdatableIndex::open(dir.clone(), 2).unwrap();
+            store.add(0, sv(&[(0, 3.0), (3, 1.0)])).unwrap();
+            store.add(1, sv(&[(0, 2.0), (4, 1.0)])).unwrap();
+            store.add(2, sv(&[(1, 4.0)])).unwrap();
+            store.add(3, sv(&[(0, 1.0), (1, 1.0)])).unwrap();
+            store.checkpoint().unwrap();
+        }
+
+        let (watched, opened) = RecordingDirectory::wrap(dir);
+        let snapshot = SnapshotIndex::open(watched).unwrap();
+        assert_eq!(snapshot.segment_count(), 2);
+        assert_eq!(snapshot.tombstone_count(), 0);
+        let hits = snapshot.search(&sv(&[(0, 1.0)]), 3).unwrap();
+        assert_eq!(
+            hits.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![0, 1, 3]
+        );
+
+        let opened = opened.lock().unwrap().clone();
+        assert!(
+            opened.iter().any(|path| path.starts_with("segstore.idx.")),
+            "snapshot should open persisted sidecars: {opened:?}"
+        );
+        assert!(
+            !opened.iter().any(|path| path.starts_with("segstore.seg.")),
+            "valid sidecars should avoid source segment payload reads: {opened:?}"
+        );
+    }
+
+    #[test]
+    fn snapshot_index_filters_tombstones_from_stale_sidecar_without_source_read() {
+        let dir = MemoryDirectory::arc();
+        let (name, stale_sidecar) = checkpointed_store(dir.clone());
+        {
+            let mut store = UpdatableIndex::open(dir.clone(), 2).unwrap();
+            store.delete(0).unwrap();
+            store.checkpoint().unwrap();
+            store
+                .inner
+                .dir()
+                .atomic_write(&name, &stale_sidecar)
+                .unwrap();
+        }
+
+        let (watched, opened) = RecordingDirectory::wrap(dir);
+        let snapshot = SnapshotIndex::open(watched).unwrap();
+        assert_eq!(snapshot.tombstone_count(), 1);
+        let hits = snapshot.search(&sv(&[(0, 1.0)]), 3).unwrap();
+        let ids: Vec<u32> = hits.into_iter().map(|(id, _)| id).collect();
+        assert!(
+            !ids.contains(&0),
+            "deleted id must be filtered before merge"
+        );
+        assert!(
+            ids.contains(&1),
+            "nearest live doc should remain searchable"
+        );
+
+        let opened = opened.lock().unwrap().clone();
+        assert!(
+            opened.iter().any(|path| path.starts_with("segstore.idx.")),
+            "snapshot should use the stale sidecar before applying tombstones: {opened:?}"
+        );
+        assert!(
+            !opened.iter().any(|path| path.starts_with("segstore.seg.")),
+            "tombstone filtering should not require source segment payload reads: {opened:?}"
+        );
+    }
+
+    #[test]
+    fn snapshot_index_rebuilds_missing_sidecar_from_one_segment() {
+        let dir = MemoryDirectory::arc();
+        let (name, _) = checkpointed_store(dir.clone());
+        dir.delete(&name).unwrap();
+
+        let (watched, opened) = RecordingDirectory::wrap(dir.clone());
+        let snapshot = SnapshotIndex::open(watched).unwrap();
+        let hits = snapshot.search(&sv(&[(0, 1.0)]), 3).unwrap();
+        assert!(
+            hits.iter().any(|(id, _)| *id == 0),
+            "missing sidecar should rebuild enough index to search"
+        );
+        assert!(
+            dir.exists(&name),
+            "snapshot fallback should persist the rebuilt sidecar"
+        );
+
+        let opened = opened.lock().unwrap().clone();
+        assert!(
+            opened.iter().any(|path| path.starts_with("segstore.seg.")),
+            "missing sidecar should fall back to one source segment read: {opened:?}"
         );
     }
 }

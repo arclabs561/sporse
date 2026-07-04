@@ -47,6 +47,8 @@ Runnable examples live in [`examples/`](examples/):
 - `postings_bridge.rs` converts live weighted `postings` entries into
   `SparseVec` documents and checks score parity against direct postings
   accumulation.
+- `raw_impact_file.rs` writes quantized `SparseVec` impacts to a
+  `postings::raw` file segment and queries the file-backed segment.
 - `wand_diagnostics.rs` checks exact top-k parity against brute force and reports
   how many documents Block-Max WAND scored.
 - `serde_roundtrip.rs` verifies built-index serialization with the `serde`

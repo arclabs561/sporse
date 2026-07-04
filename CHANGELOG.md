@@ -22,6 +22,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 - Added `SparseVec::to_raw_impact_document` and
   `SparseVec::to_raw_impact_query` for zero-dependency quantized-impact pairs
   that callers can write to `postings::raw`.
+- Added a `raw_impact_file` example that writes quantized `SparseVec` impacts to
+  a `postings::raw` file segment and queries it.
 
 ### Changed
 

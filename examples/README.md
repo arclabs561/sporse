@@ -9,6 +9,7 @@ feature ids, weights are non-negative retrieval scores.
 |---|---|---|
 | See how inner-product scores are formed | `basic` | `cargo run --release --example basic` |
 | Convert live weighted postings into sparse vectors | `postings_bridge` | `cargo run --release --example postings_bridge` |
+| Write sparse vectors as raw impact files | `raw_impact_file` | `cargo run --release --example raw_impact_file` |
 | Check Block-Max WAND against brute force | `wand_diagnostics` | `cargo run --release --example wand_diagnostics` |
 | Combine sparse and dense retrieval | `hybrid_retrieval` | `cargo run --release --example hybrid_retrieval` |
 | Train sparse codes, then index them | `ccsa_retrieval` | `cargo run --release --example ccsa_retrieval` |
@@ -55,6 +56,24 @@ Output excerpt:
 ```text
 postings top-k: [(2, 8.45), (3, 4.8), (0, 2.6999998)]
 sporse top-k:   [(2, 8.45), (3, 4.8), (0, 2.6999998)]
+```
+
+## Raw Impact File
+
+`raw_impact_file.rs` converts `SparseVec` documents with
+`SparseVec::to_raw_impact_document`, writes a `postings::raw` segment to a temp
+file, then queries that file-backed segment with
+`SparseVec::to_raw_impact_query`.
+
+The example keeps publication, fsync policy, manifests, deletes, and compaction
+outside `sporse`; it only demonstrates the data conversion and raw segment
+query boundary.
+
+Output excerpt:
+
+```text
+top-k from postings::raw:
+  doc 101: 5.120  learned sparse retrieval
 ```
 
 ## WAND Diagnostics

@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-07-04
+
 ### Added
 
 - Added `RawImpactQuantizer` as a checked raw-impact scale value for encoding

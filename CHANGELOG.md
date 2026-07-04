@@ -19,6 +19,9 @@ All notable changes to this project are documented here. Format based on [Keep a
   sparse oracle.
 - Added multi-file raw-impact benchmark and diagnostics alongside the
   single-file raw-impact path.
+- Added `SparseVec::to_raw_impact_document` and
+  `SparseVec::to_raw_impact_query` for zero-dependency quantized-impact pairs
+  that callers can write to `postings::raw`.
 
 ### Changed
 

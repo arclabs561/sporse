@@ -36,7 +36,51 @@ pub mod sae;
 #[cfg(feature = "store")]
 pub mod store;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
+
+/// Errors returned when converting sparse vectors to quantized raw impacts.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RawImpactError {
+    /// Quantization scale must be finite and positive.
+    InvalidScale { scale: f32 },
+    /// Raw impact documents and queries require finite non-negative weights.
+    InvalidWeight { dim: u32, weight: f32 },
+    /// A positive weight rounded to zero at the requested scale.
+    RoundedToZero { dim: u32, weight: f32, scale: f32 },
+    /// A scaled document impact cannot fit in `u32`.
+    WeightOverflow { dim: u32, weight: f32, scale: f32 },
+}
+
+impl fmt::Display for RawImpactError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::InvalidScale { scale } => {
+                write!(f, "raw impact scale must be finite and positive: {scale}")
+            }
+            Self::InvalidWeight { dim, weight } => {
+                write!(
+                    f,
+                    "raw impact weight must be finite and non-negative for dim {dim}: {weight}"
+                )
+            }
+            Self::RoundedToZero { dim, weight, scale } => {
+                write!(
+                    f,
+                    "raw impact weight for dim {dim} rounds to zero: weight={weight}, scale={scale}"
+                )
+            }
+            Self::WeightOverflow { dim, weight, scale } => {
+                write!(
+                    f,
+                    "raw impact weight for dim {dim} exceeds u32: weight={weight}, scale={scale}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for RawImpactError {}
 
 // ── SparseVec ────────────────────────────────────────────────────────────────
 
@@ -122,6 +166,63 @@ impl SparseVec {
             }
         }
         sum
+    }
+
+    /// Quantize this vector as raw document impacts.
+    ///
+    /// The returned `(dimension, impact)` pairs are sorted by dimension and use
+    /// `u64` dimensions to match `postings::raw::RawTermId` without depending on
+    /// `postings`. This is for non-negative learned-sparse weights; negative or
+    /// non-finite weights return an error.
+    pub fn to_raw_impact_document(&self, scale: f32) -> Result<Vec<(u64, u32)>, RawImpactError> {
+        validate_raw_impact_scale(scale)?;
+        self.pairs
+            .iter()
+            .map(|&(dim, weight)| {
+                validate_raw_impact_weight(dim, weight)?;
+                let scaled = weight as f64 * scale as f64;
+                if scaled > u32::MAX as f64 {
+                    return Err(RawImpactError::WeightOverflow { dim, weight, scale });
+                }
+                let impact = scaled.round();
+                if impact < 1.0 {
+                    return Err(RawImpactError::RoundedToZero { dim, weight, scale });
+                }
+                Ok((dim as u64, impact as u32))
+            })
+            .collect()
+    }
+
+    /// Rescale this vector as a raw impact query.
+    ///
+    /// Pair this with documents from [`Self::to_raw_impact_document`] at the
+    /// same scale. The approximate raw score is
+    /// `round(doc_weight * scale) * query_weight / scale`.
+    pub fn to_raw_impact_query(&self, scale: f32) -> Result<Vec<(u64, f32)>, RawImpactError> {
+        validate_raw_impact_scale(scale)?;
+        self.pairs
+            .iter()
+            .map(|&(dim, weight)| {
+                validate_raw_impact_weight(dim, weight)?;
+                Ok((dim as u64, weight / scale))
+            })
+            .collect()
+    }
+}
+
+fn validate_raw_impact_scale(scale: f32) -> Result<(), RawImpactError> {
+    if scale.is_finite() && scale > 0.0 {
+        Ok(())
+    } else {
+        Err(RawImpactError::InvalidScale { scale })
+    }
+}
+
+fn validate_raw_impact_weight(dim: u32, weight: f32) -> Result<(), RawImpactError> {
+    if weight.is_finite() && weight >= 0.0 {
+        Ok(())
+    } else {
+        Err(RawImpactError::InvalidWeight { dim, weight })
     }
 }
 
@@ -502,6 +603,66 @@ mod tests {
         ]);
 
         assert_eq!(sv.pairs(), &[(1, 1.0), (5, 4.0)]);
+    }
+
+    #[test]
+    fn sparse_vec_quantizes_raw_impact_document_and_query() {
+        let sv = SparseVec::new(vec![(3, 1.25), (1, 0.25), (3, 0.25)]);
+
+        assert_eq!(
+            sv.to_raw_impact_document(100.0).unwrap(),
+            vec![(1, 25), (3, 150)]
+        );
+        let query = sv.to_raw_impact_query(100.0).unwrap();
+        assert_eq!(query[0].0, 1);
+        assert!((query[0].1 - 0.0025).abs() < 1e-8);
+        assert_eq!(query[1].0, 3);
+        assert!((query[1].1 - 0.015).abs() < 1e-8);
+    }
+
+    #[test]
+    fn sparse_vec_raw_impact_quantization_rejects_invalid_inputs() {
+        assert_eq!(
+            SparseVec::new(vec![(1, 1.0)])
+                .to_raw_impact_document(0.0)
+                .unwrap_err(),
+            RawImpactError::InvalidScale { scale: 0.0 }
+        );
+        assert_eq!(
+            SparseVec::new(vec![(1, -1.0)])
+                .to_raw_impact_document(100.0)
+                .unwrap_err(),
+            RawImpactError::InvalidWeight {
+                dim: 1,
+                weight: -1.0,
+            }
+        );
+        assert_eq!(
+            SparseVec::new(vec![(1, 0.001)])
+                .to_raw_impact_document(100.0)
+                .unwrap_err(),
+            RawImpactError::RoundedToZero {
+                dim: 1,
+                weight: 0.001,
+                scale: 100.0,
+            }
+        );
+        assert_eq!(
+            SparseVec::new(vec![(1, u32::MAX as f32)])
+                .to_raw_impact_document(2.0)
+                .unwrap_err(),
+            RawImpactError::WeightOverflow {
+                dim: 1,
+                weight: u32::MAX as f32,
+                scale: 2.0,
+            }
+        );
+        assert!(matches!(
+            SparseVec::new(vec![(1, f32::NAN)])
+                .to_raw_impact_query(100.0)
+                .unwrap_err(),
+            RawImpactError::InvalidWeight { dim: 1, weight } if weight.is_nan()
+        ));
     }
 
     #[test]

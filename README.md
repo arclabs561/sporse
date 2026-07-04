@@ -80,10 +80,12 @@ cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [
   `search_with_stats` reports segment-level pruning diagnostics. The
   source sparse-vector segments are still loaded by the current `segstore` open
   path; fully out-of-core learned-sparse search needs byte-native sparse segment
-  sidecars. `postings::raw` already covers `u32` impact-score segments, while
-  native `SparseVec` weights are `f32`. The current test suite covers a
-  quantized-impact bridge and recall sweeps across scales and query densities,
-  but that path is not public storage API yet.
+  sidecars. `SparseVec::to_raw_impact_document` and
+  `SparseVec::to_raw_impact_query` produce quantized impact pairs that callers
+  can write to `postings::raw` without `sporse` owning the file lifecycle.
+  `postings::raw` covers `u32` impact-score segments, while native `SparseVec`
+  weights are `f32`. The current test suite covers recall sweeps across scales
+  and query densities, but that path is not public storage API yet.
 
 ## References
 

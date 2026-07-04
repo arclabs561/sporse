@@ -116,12 +116,7 @@ fn write_raw_impact_file(docs: &[SparseVec]) -> TempRawPath {
 fn write_raw_impact_file_with_base(docs: &[SparseVec], base_doc_id: u32) -> TempRawPath {
     let raw_terms: Vec<Vec<_>> = docs
         .iter()
-        .map(|doc| {
-            doc.pairs()
-                .iter()
-                .map(|&(dim, weight)| (dim as RawTermId, quantize(weight, IMPACT_SCALE)))
-                .collect()
-        })
+        .map(|doc| doc.to_raw_impact_document(IMPACT_SCALE).unwrap())
         .collect();
     let path = TempRawPath::new();
     let docs = raw_terms
@@ -145,17 +140,7 @@ fn write_raw_impact_files(docs: &[SparseVec], n_files: usize) -> Vec<TempRawPath
 }
 
 fn raw_query(query: &SparseVec, scale: f32) -> Vec<(RawTermId, f32)> {
-    query
-        .pairs()
-        .iter()
-        .map(|&(dim, weight)| (dim as RawTermId, weight / scale))
-        .collect()
-}
-
-fn quantize(weight: f32, scale: f32) -> u32 {
-    let scaled = (weight * scale).round();
-    debug_assert!(scaled.is_finite() && scaled > 0.0 && scaled <= u32::MAX as f32);
-    scaled as u32
+    query.to_raw_impact_query(scale).unwrap()
 }
 
 struct TempRawPath {

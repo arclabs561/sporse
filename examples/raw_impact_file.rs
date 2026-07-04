@@ -1,5 +1,6 @@
-//! Write quantized `SparseVec` impacts to a file-backed `postings::raw`
-//! segment and query it without building an in-memory `SporseIndex`.
+//! Seal quantized `SparseVec` impacts from a live numeric postings shard into a
+//! file-backed `postings::raw` segment and query it without building an
+//! in-memory `SporseIndex`.
 //!
 //! Run with:
 //! `cargo run --example raw_impact_file`
@@ -8,7 +9,8 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use postings::raw::{write_u64_u32_segment_sorted_from_iter_to, RawDocument, RawSegmentFile};
+use postings::raw::{write_u64_u32_segment_from_index_seekable_to, RawSegmentFile};
+use postings::PostingsIndex;
 use sporse::SparseVec;
 
 const SCALE: f32 = 100.0;
@@ -38,19 +40,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     ];
 
-    let raw_terms: Vec<_> = docs
-        .iter()
-        .map(|doc| doc.vector.to_raw_impact_document(SCALE))
-        .collect::<Result<_, _>>()?;
-    let raw_docs: Vec<_> = docs
-        .iter()
-        .zip(raw_terms.iter())
-        .map(|(doc, terms)| RawDocument::new(doc.id, terms))
-        .collect();
+    let mut live_shard = PostingsIndex::new();
+    for doc in &docs {
+        let terms = doc.vector.to_raw_impact_document(SCALE)?;
+        live_shard.add_weighted_document(doc.id, &terms)?;
+    }
 
     let temp = TempRawFile::new()?;
     let mut file = File::create(temp.path())?;
-    write_u64_u32_segment_sorted_from_iter_to(raw_docs.iter().copied(), &mut file)?;
+    write_u64_u32_segment_from_index_seekable_to(&live_shard, &mut file)?;
     file.sync_all()?;
     drop(file);
 

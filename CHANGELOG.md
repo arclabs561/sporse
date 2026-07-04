@@ -45,6 +45,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 - Changed raw-impact benchmark setup to stream sorted postings raw documents
   directly to temp files instead of building a full raw segment byte vector
   before writing.
+- Changed the `raw_impact_file` example to seal a live numeric postings shard
+  into a raw segment file before querying it.
 - The `store` feature now requires `segstore = "0.4.1"` for manifest-only
   snapshot reads. This remains fully optional; default builds do not depend on
   the storage stack.

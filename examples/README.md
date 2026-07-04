@@ -61,8 +61,8 @@ sporse top-k:   [(2, 8.45), (3, 4.8), (0, 2.6999998)]
 ## Raw Impact File
 
 `raw_impact_file.rs` converts `SparseVec` documents with
-`SparseVec::to_raw_impact_document`, writes a `postings::raw` segment to a temp
-file, then queries that file-backed segment with
+`SparseVec::to_raw_impact_document`, seals a live numeric postings shard to a
+`postings::raw` temp file, then queries that file-backed segment with
 `SparseVec::to_raw_impact_query`.
 
 The example keeps publication, fsync policy, manifests, deletes, and compaction

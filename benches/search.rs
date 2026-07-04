@@ -22,6 +22,11 @@ const QUERY_NNZ: usize = 50; // nonzero dims per query
 const N_QUERIES: usize = 32; // query batch size for latency benchmarks
 const BENCH_SEED: u64 = 0xDEAD_BEEF_CAFE_1337;
 const IMPACT_SCALE: f32 = 100.0;
+const PARTITIONED_RAW_SEGMENTS: usize = 4;
+const PARTITIONED_RAW_DOCS_PER_SEGMENT: usize = 512;
+const PARTITIONED_RAW_VOCAB_PER_SEGMENT: u64 = 2_048;
+const PARTITIONED_RAW_DOC_NNZ: usize = 32;
+const PARTITIONED_RAW_QUERY_NNZ: usize = 16;
 
 // ── Minimal deterministic RNG (xorshift64) ───────────────────────────────────
 
@@ -135,6 +140,52 @@ fn write_raw_impact_files(docs: &[SparseVec], n_files: usize) -> Vec<TempRawPath
         .enumerate()
         .map(|(chunk_id, chunk)| {
             write_raw_impact_file_with_base(chunk, (chunk_id * chunk_size) as u32)
+        })
+        .collect()
+}
+
+fn write_partitioned_raw_impact_files() -> Vec<TempRawPath> {
+    (0..PARTITIONED_RAW_SEGMENTS)
+        .map(|segment| {
+            let base_term = segment as u64 * PARTITIONED_RAW_VOCAB_PER_SEGMENT;
+            let raw_terms: Vec<Vec<(RawTermId, u32)>> = (0..PARTITIONED_RAW_DOCS_PER_SEGMENT)
+                .map(|doc| {
+                    (0..PARTITIONED_RAW_DOC_NNZ)
+                        .map(|offset| {
+                            let term = base_term
+                                + ((doc as u64 * 37 + offset as u64 * 101)
+                                    % PARTITIONED_RAW_VOCAB_PER_SEGMENT);
+                            let impact = 1 + ((doc + offset * 17) % 100) as u32;
+                            (term, impact)
+                        })
+                        .collect()
+                })
+                .collect();
+            let path = TempRawPath::new();
+            let docs = raw_terms.iter().enumerate().map(|(doc_id, terms)| {
+                RawDocument::new(
+                    (segment * PARTITIONED_RAW_DOCS_PER_SEGMENT + doc_id) as u32,
+                    terms,
+                )
+            });
+            let mut file = std::fs::File::create(path.as_path()).unwrap();
+            write_u64_u32_segment_sorted_from_iter_to(docs, &mut file).unwrap();
+            path
+        })
+        .collect()
+}
+
+fn partitioned_raw_queries() -> Vec<Vec<(RawTermId, f32)>> {
+    (0..PARTITIONED_RAW_SEGMENTS)
+        .map(|segment| {
+            let base_term = segment as u64 * PARTITIONED_RAW_VOCAB_PER_SEGMENT;
+            (0..PARTITIONED_RAW_QUERY_NNZ)
+                .map(|offset| {
+                    let term =
+                        base_term + (offset as u64 * 101 % PARTITIONED_RAW_VOCAB_PER_SEGMENT);
+                    (term, 1.0)
+                })
+                .collect()
         })
         .collect()
 }
@@ -298,6 +349,17 @@ fn print_diagnostics(c: &mut Criterion) {
     let mut raw_segments_seen = 0usize;
     let mut raw_segments_scored = 0usize;
     let mut raw_segments_pruned = 0usize;
+    let partitioned_raw_paths = write_partitioned_raw_impact_files();
+    let mut partitioned_raw_segments: Vec<RawSegmentFile> = partitioned_raw_paths
+        .iter()
+        .map(|path| RawSegmentFile::open(path.as_path()).unwrap())
+        .collect();
+    let mut partitioned_raw_refs: Vec<&mut RawSegmentFile> =
+        partitioned_raw_segments.iter_mut().collect();
+    let partitioned_raw_queries = partitioned_raw_queries();
+    let mut partitioned_raw_segments_seen = 0usize;
+    let mut partitioned_raw_segments_scored = 0usize;
+    let mut partitioned_raw_segments_pruned = 0usize;
 
     for (i, q) in fixture.queries.iter().take(n_check).enumerate() {
         let (wand, stats) = fixture.index.search_with_stats(q, k);
@@ -329,6 +391,17 @@ fn print_diagnostics(c: &mut Criterion) {
         total_scored += stats.docs_scored;
         total_skips += stats.cursor_skips;
     }
+    for query in &partitioned_raw_queries {
+        let result = top_k_weighted_u32_files_with_stats(&mut partitioned_raw_refs, query, k)
+            .expect("partitioned raw diagnostic search should succeed");
+        assert!(
+            !result.hits.is_empty(),
+            "partitioned raw diagnostic should return hits"
+        );
+        partitioned_raw_segments_seen += result.stats.segments_seen;
+        partitioned_raw_segments_scored += result.stats.segments_scored;
+        partitioned_raw_segments_pruned += result.stats.segments_pruned;
+    }
 
     let n = n_check as u64;
     let avg_iter = total_iterations / n;
@@ -342,6 +415,16 @@ fn print_diagnostics(c: &mut Criterion) {
     let avg_raw_seen = raw_segments_seen as f64 / n_check as f64;
     let avg_raw_scored = raw_segments_scored as f64 / n_check as f64;
     let avg_raw_pruned = raw_segments_pruned as f64 / n_check as f64;
+    let avg_partitioned_raw_seen =
+        partitioned_raw_segments_seen as f64 / partitioned_raw_queries.len() as f64;
+    let avg_partitioned_raw_scored =
+        partitioned_raw_segments_scored as f64 / partitioned_raw_queries.len() as f64;
+    let avg_partitioned_raw_pruned =
+        partitioned_raw_segments_pruned as f64 / partitioned_raw_queries.len() as f64;
+    assert!(
+        avg_partitioned_raw_pruned > 0.0,
+        "partitioned raw diagnostic should exercise segment pruning"
+    );
     // WAND efficiency: fraction of the 10K collection actually scored
     let scored_frac = 100.0 * avg_scored as f64 / N_DOCS as f64;
 
@@ -369,6 +452,9 @@ fn print_diagnostics(c: &mut Criterion) {
     eprintln!("  advance_to calls per iteration: {advances_per_iter:.2}");
     eprintln!(
         "  raw files searched/pruned segments: {avg_raw_scored:.1}/{avg_raw_pruned:.1} of {avg_raw_seen:.1}"
+    );
+    eprintln!(
+        "  partitioned raw files searched/pruned segments: {avg_partitioned_raw_scored:.1}/{avg_partitioned_raw_pruned:.1} of {avg_partitioned_raw_seen:.1}"
     );
 
     // Dummy bench so criterion doesn't complain about an unused group

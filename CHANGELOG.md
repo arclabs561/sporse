@@ -4,6 +4,12 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+### Fixed
+
+- Store sidecar envelopes now include the `segstore` segment id, so a copied or
+  misnamed WAND sidecar is rejected and rebuilt instead of being accepted for a
+  different segment.
+
 ### Added
 
 - Added a `store_reopen_diagnostics` example that measures the

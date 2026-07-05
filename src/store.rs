@@ -86,7 +86,7 @@ struct ReaderCache {
 /// The `kind` tag for a persisted per-segment WAND sidecar.
 const INDEX_KIND: &str = "wand";
 const SIDECAR_MAGIC: &[u8; 8] = b"SPORIDX1";
-const SIDECAR_VERSION: u32 = 1;
+const SIDECAR_VERSION: u32 = 2;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SporseSidecar {
@@ -452,9 +452,14 @@ impl UpdatableIndex {
     /// current live ids. A stale sidecar can never serve a tombstoned document.
     fn load_sidecar(&self, seg: &[(u32, SparseVec)], seg_id: u64) -> Option<SporseIndex> {
         let name = self.inner.index_name(seg_id, INDEX_KIND);
-        Self::load_sidecar_from(self.inner.dir(), &name, &self.sidecar_recipe, seg, &|id| {
-            self.inner.is_live(id)
-        })
+        Self::load_sidecar_from(
+            self.inner.dir(),
+            &name,
+            &self.sidecar_recipe,
+            seg,
+            &|id| self.inner.is_live(id),
+            seg_id,
+        )
     }
 
     fn load_sidecar_from(
@@ -463,13 +468,14 @@ impl UpdatableIndex {
         sidecar_recipe: &str,
         seg: &[(u32, SparseVec)],
         live: &dyn Fn(&u32) -> bool,
+        seg_id: u64,
     ) -> Option<SporseIndex> {
         if !dir.exists(name) {
             return None;
         }
         let mut bytes = Vec::new();
         dir.open_file(name).ok()?.read_to_end(&mut bytes).ok()?;
-        let index_bytes = Self::decode_sidecar_for_recipe(sidecar_recipe, &bytes)?;
+        let index_bytes = Self::decode_sidecar_for_recipe(sidecar_recipe, seg_id, &bytes)?;
         let sidecar: SporseSidecar = postcard::from_bytes(index_bytes).ok()?;
         if !sidecar.index.built {
             return None;
@@ -491,7 +497,7 @@ impl UpdatableIndex {
             ids: self.live_ids_vec(seg),
         };
         if let Ok(index) = postcard::to_allocvec(&sidecar) {
-            let Some(bytes) = self.encode_sidecar(&index) else {
+            let Some(bytes) = self.encode_sidecar(&index, seg_id) else {
                 return;
             };
             if self
@@ -527,16 +533,21 @@ impl UpdatableIndex {
         )
     }
 
-    fn encode_sidecar(&self, index: &[u8]) -> Option<Vec<u8>> {
-        Self::encode_sidecar_for_recipe(&self.sidecar_recipe, index)
+    fn encode_sidecar(&self, index: &[u8], seg_id: u64) -> Option<Vec<u8>> {
+        Self::encode_sidecar_for_recipe(&self.sidecar_recipe, seg_id, index)
     }
 
-    fn encode_sidecar_for_recipe(sidecar_recipe: &str, index: &[u8]) -> Option<Vec<u8>> {
+    fn encode_sidecar_for_recipe(
+        sidecar_recipe: &str,
+        seg_id: u64,
+        index: &[u8],
+    ) -> Option<Vec<u8>> {
         let recipe = sidecar_recipe.as_bytes();
         let recipe_len = u32::try_from(recipe.len()).ok()?;
-        let mut bytes = Vec::with_capacity(16 + recipe.len() + index.len());
+        let mut bytes = Vec::with_capacity(24 + recipe.len() + index.len());
         bytes.extend_from_slice(SIDECAR_MAGIC);
         bytes.extend_from_slice(&SIDECAR_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&seg_id.to_le_bytes());
         bytes.extend_from_slice(&recipe_len.to_le_bytes());
         bytes.extend_from_slice(recipe);
         bytes.extend_from_slice(index);
@@ -544,12 +555,16 @@ impl UpdatableIndex {
     }
 
     #[cfg(test)]
-    fn decode_sidecar<'a>(&self, bytes: &'a [u8]) -> Option<&'a [u8]> {
-        Self::decode_sidecar_for_recipe(&self.sidecar_recipe, bytes)
+    fn decode_sidecar<'a>(&self, bytes: &'a [u8], seg_id: u64) -> Option<&'a [u8]> {
+        Self::decode_sidecar_for_recipe(&self.sidecar_recipe, seg_id, bytes)
     }
 
-    fn decode_sidecar_for_recipe<'a>(sidecar_recipe: &str, bytes: &'a [u8]) -> Option<&'a [u8]> {
-        if bytes.len() < 16 {
+    fn decode_sidecar_for_recipe<'a>(
+        sidecar_recipe: &str,
+        seg_id: u64,
+        bytes: &'a [u8],
+    ) -> Option<&'a [u8]> {
+        if bytes.len() < 24 {
             return None;
         }
         if &bytes[..8] != SIDECAR_MAGIC {
@@ -559,8 +574,12 @@ impl UpdatableIndex {
         if version != SIDECAR_VERSION {
             return None;
         }
-        let recipe_len = u32::from_le_bytes(bytes[12..16].try_into().ok()?) as usize;
-        let recipe_start = 16usize;
+        let encoded_seg_id = u64::from_le_bytes(bytes[12..20].try_into().ok()?);
+        if encoded_seg_id != seg_id {
+            return None;
+        }
+        let recipe_len = u32::from_le_bytes(bytes[20..24].try_into().ok()?) as usize;
+        let recipe_start = 24usize;
         let recipe_end = recipe_start.checked_add(recipe_len)?;
         if bytes.len() < recipe_end {
             return None;
@@ -681,6 +700,7 @@ impl UpdatableView {
                         self.sidecar_recipe.as_ref(),
                         &seg[..],
                         &live,
+                        seg_id,
                     )
                     .or_else(|| UpdatableIndex::build_live_index_from(&seg[..], &live))
                     .map(|index| {
@@ -840,7 +860,8 @@ impl SnapshotIndex {
             .ok()?
             .read_to_end(&mut bytes)
             .ok()?;
-        let index_bytes = UpdatableIndex::decode_sidecar_for_recipe(&self.sidecar_recipe, &bytes)?;
+        let index_bytes =
+            UpdatableIndex::decode_sidecar_for_recipe(&self.sidecar_recipe, seg_id, &bytes)?;
         let sidecar: SporseSidecar = postcard::from_bytes(index_bytes).ok()?;
         if !sidecar.index.built {
             return None;
@@ -862,9 +883,11 @@ impl SnapshotIndex {
             ids: UpdatableIndex::live_ids_vec_from(segment, &|id| self.catalog.is_live(id)),
         };
         if let Ok(index_bytes) = postcard::to_allocvec(&sidecar) {
-            let Some(bytes) =
-                UpdatableIndex::encode_sidecar_for_recipe(&self.sidecar_recipe, &index_bytes)
-            else {
+            let Some(bytes) = UpdatableIndex::encode_sidecar_for_recipe(
+                &self.sidecar_recipe,
+                seg_id,
+                &index_bytes,
+            ) else {
                 return;
             };
             let _ = self
@@ -1397,26 +1420,32 @@ mod tests {
     fn wand_sidecar_envelope_rejects_corrupt_headers() {
         let store = UpdatableIndex::open(MemoryDirectory::arc(), 2).unwrap();
         let index = b"index-bytes";
-        let bytes = store.encode_sidecar(index).unwrap();
-        assert_eq!(store.decode_sidecar(&bytes), Some(index.as_slice()));
+        let seg_id = 7;
+        let bytes = store.encode_sidecar(index, seg_id).unwrap();
+        assert_eq!(store.decode_sidecar(&bytes, seg_id), Some(index.as_slice()));
 
-        assert!(store.decode_sidecar(&bytes[..8]).is_none());
+        assert!(store.decode_sidecar(&bytes[..8], seg_id).is_none());
 
         let mut bad_magic = bytes.clone();
         bad_magic[0] ^= 0xFF;
-        assert!(store.decode_sidecar(&bad_magic).is_none());
+        assert!(store.decode_sidecar(&bad_magic, seg_id).is_none());
 
         let mut bad_version = bytes.clone();
         bad_version[8..12].copy_from_slice(&(SIDECAR_VERSION + 1).to_le_bytes());
-        assert!(store.decode_sidecar(&bad_version).is_none());
+        assert!(store.decode_sidecar(&bad_version, seg_id).is_none());
+
+        assert!(
+            store.decode_sidecar(&bytes, seg_id + 1).is_none(),
+            "sidecar must not load for a different segment id"
+        );
 
         let mut bad_recipe_len = bytes.clone();
-        bad_recipe_len[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(store.decode_sidecar(&bad_recipe_len).is_none());
+        bad_recipe_len[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(store.decode_sidecar(&bad_recipe_len, seg_id).is_none());
 
         let mut bad_recipe = bytes.clone();
-        bad_recipe[16] ^= 0x01;
-        assert!(store.decode_sidecar(&bad_recipe).is_none());
+        bad_recipe[24] ^= 0x01;
+        assert!(store.decode_sidecar(&bad_recipe, seg_id).is_none());
     }
 
     #[test]
@@ -1425,8 +1454,9 @@ mod tests {
         let (name, _) = checkpointed_store(dir.clone());
         {
             let store = UpdatableIndex::open(dir.clone(), 2).unwrap();
+            let seg_id = store.inner.segment_ids()[0];
             let corrupt = store
-                .encode_sidecar(b"not-a-postcard-sporse-index")
+                .encode_sidecar(b"not-a-postcard-sporse-index", seg_id)
                 .unwrap();
             store.inner.dir().atomic_write(&name, &corrupt).unwrap();
         }
@@ -1643,6 +1673,45 @@ mod tests {
         assert!(
             !opened.iter().any(|path| path.starts_with("segstore.seg.")),
             "overfetching stale sidecars should avoid source segment reads: {opened:?}"
+        );
+    }
+
+    #[test]
+    fn snapshot_index_rebuilds_sidecar_with_wrong_segment_id() {
+        let dir = MemoryDirectory::arc();
+        {
+            let mut store = UpdatableIndex::open(dir.clone(), 2).unwrap();
+            store.add(0, sv(&[(0, 1.0)])).unwrap();
+            store.add(1, sv(&[(0, 0.9)])).unwrap();
+            store.add(2, sv(&[(1, 1.0)])).unwrap();
+            store.add(3, sv(&[(1, 0.9)])).unwrap();
+            store.checkpoint().unwrap();
+
+            let ids = store.inner.segment_ids();
+            assert_eq!(ids.len(), 2, "test setup should create two segments");
+            let first = read_file(
+                store.inner.dir(),
+                &store.inner.index_name(ids[0], INDEX_KIND),
+            );
+            store
+                .inner
+                .dir()
+                .atomic_write(&store.inner.index_name(ids[1], INDEX_KIND), &first)
+                .unwrap();
+        }
+
+        let (watched, opened) = RecordingDirectory::wrap(dir);
+        let snapshot = SnapshotIndex::open(watched).unwrap();
+        let hits = snapshot.search(&sv(&[(1, 1.0)]), 2).unwrap();
+        assert!(
+            hits.iter().any(|(id, _)| *id == 2),
+            "segment 1 should be rebuilt and searched after rejecting the copied sidecar: {hits:?}"
+        );
+
+        let opened = opened.lock().unwrap().clone();
+        assert!(
+            opened.iter().any(|path| path == "segstore.seg.1"),
+            "wrong-segment sidecar should fall back to that source segment: {opened:?}"
         );
     }
 

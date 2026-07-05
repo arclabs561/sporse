@@ -104,6 +104,25 @@ after rebuild searched/pruned segments: 1/4
 top hit: Some((37, 320.0))
 ```
 
+## Search Bench Diagnostics
+
+The search benchmark's `diagnostics_noop` target checks WAND and raw-impact
+top-k parity against brute force, then prints pruning counters for random raw
+files, vocab-local partitioned files, and an interleaved control over the same
+synthetic documents.
+
+```sh
+cargo bench --bench search -- diagnostics_noop --warm-up-time 0.1 --measurement-time 0.1 --sample-size 10
+```
+
+Current layout counters from that diagnostic:
+
+```text
+raw files searched/pruned segments: 4.0/0.0 of 4.0
+partitioned raw files searched/pruned segments: 1.0/3.0 of 4.0
+interleaved partitioned raw files searched/pruned segments: 4.0/0.0 of 4.0
+```
+
 ## WAND Diagnostics
 
 `wand_diagnostics.rs` builds a larger synthetic index, checks exact top-k

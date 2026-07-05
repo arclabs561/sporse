@@ -107,7 +107,11 @@ cargo bench --bench search -- diagnostics_noop --warm-up-time 0.1 --measurement-
 
 The diagnostic pass checks WAND, raw-file, multi-file raw, and files-plus-live
 raw top-k parity against brute force, then prints average documents scored,
-cursor skips, and raw segment pruning counts.
+cursor skips, and raw segment pruning counts. It also compares raw segment
+layout policies on the same synthetic documents: in the current fixture,
+random files search/prune 4.0/0.0 segments, vocab-local partitioned files
+search/prune 1.0/3.0, and an interleaved partitioned control searches/prunes
+4.0/0.0.
 
 ## References
 

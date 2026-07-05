@@ -12,6 +12,9 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ### Added
 
+- Added raw-impact build-policy diagnostics comparing vocab-local partitioned
+  files against an interleaved control over the same synthetic documents, so
+  segment-pruning wins are tied to layout policy rather than only corpus shape.
 - Added a `store_reopen_diagnostics` example that measures the
   `store::SnapshotIndex` sidecar-first reader path versus rebuilding missing
   per-segment WAND sidecars from source sparse-vector segments.

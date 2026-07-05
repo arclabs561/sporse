@@ -173,22 +173,23 @@ fn write_raw_impact_files(docs: &[SparseVec], n_files: usize) -> Vec<TempRawPath
         .collect()
 }
 
+fn partitioned_raw_terms(segment: usize, doc: usize) -> Vec<(RawTermId, u32)> {
+    let base_term = segment as u64 * PARTITIONED_RAW_VOCAB_PER_SEGMENT;
+    (0..PARTITIONED_RAW_DOC_NNZ)
+        .map(|offset| {
+            let term = base_term
+                + ((doc as u64 * 37 + offset as u64 * 101) % PARTITIONED_RAW_VOCAB_PER_SEGMENT);
+            let impact = 1 + ((doc + offset * 17) % 100) as u32;
+            (term, impact)
+        })
+        .collect()
+}
+
 fn write_partitioned_raw_impact_files() -> Vec<TempRawPath> {
     (0..PARTITIONED_RAW_SEGMENTS)
         .map(|segment| {
-            let base_term = segment as u64 * PARTITIONED_RAW_VOCAB_PER_SEGMENT;
             let raw_terms: Vec<Vec<(RawTermId, u32)>> = (0..PARTITIONED_RAW_DOCS_PER_SEGMENT)
-                .map(|doc| {
-                    (0..PARTITIONED_RAW_DOC_NNZ)
-                        .map(|offset| {
-                            let term = base_term
-                                + ((doc as u64 * 37 + offset as u64 * 101)
-                                    % PARTITIONED_RAW_VOCAB_PER_SEGMENT);
-                            let impact = 1 + ((doc + offset * 17) % 100) as u32;
-                            (term, impact)
-                        })
-                        .collect()
-                })
+                .map(|doc| partitioned_raw_terms(segment, doc))
                 .collect();
             let path = TempRawPath::new();
             let docs = raw_terms.iter().enumerate().map(|(doc_id, terms)| {
@@ -199,6 +200,32 @@ fn write_partitioned_raw_impact_files() -> Vec<TempRawPath> {
             });
             let mut file = std::fs::File::create(path.as_path()).unwrap();
             write_u64_u32_segment_sorted_from_iter_to(docs, &mut file).unwrap();
+            path
+        })
+        .collect()
+}
+
+fn write_interleaved_partitioned_raw_impact_files() -> Vec<TempRawPath> {
+    (0..PARTITIONED_RAW_SEGMENTS)
+        .map(|file| {
+            let path = TempRawPath::new();
+            let raw_terms: Vec<(u32, Vec<(RawTermId, u32)>)> = (0..PARTITIONED_RAW_SEGMENTS)
+                .flat_map(|segment| {
+                    (file..PARTITIONED_RAW_DOCS_PER_SEGMENT)
+                        .step_by(PARTITIONED_RAW_SEGMENTS)
+                        .map(move |doc| {
+                            (
+                                (segment * PARTITIONED_RAW_DOCS_PER_SEGMENT + doc) as u32,
+                                partitioned_raw_terms(segment, doc),
+                            )
+                        })
+                })
+                .collect();
+            let docs = raw_terms
+                .iter()
+                .map(|(doc_id, terms)| RawDocument::new(*doc_id, terms));
+            let mut output = std::fs::File::create(path.as_path()).unwrap();
+            write_u64_u32_segment_sorted_from_iter_to(docs, &mut output).unwrap();
             path
         })
         .collect()
@@ -304,6 +331,10 @@ fn bench_raw_impact_build(c: &mut Criterion) {
 
     group.bench_function("partitioned_files_2k", |b| {
         b.iter_with_large_drop(write_partitioned_raw_impact_files);
+    });
+
+    group.bench_function("interleaved_partitioned_files_2k", |b| {
+        b.iter_with_large_drop(write_interleaved_partitioned_raw_impact_files);
     });
 
     group.bench_function("live_index_10k", |b| {
@@ -454,10 +485,20 @@ fn print_diagnostics(c: &mut Criterion) {
         .collect();
     let mut partitioned_raw_refs: Vec<&mut RawSegmentFile> =
         partitioned_raw_segments.iter_mut().collect();
+    let interleaved_raw_paths = write_interleaved_partitioned_raw_impact_files();
+    let mut interleaved_raw_segments: Vec<RawSegmentFile> = interleaved_raw_paths
+        .iter()
+        .map(|path| RawSegmentFile::open(path.as_path()).unwrap())
+        .collect();
+    let mut interleaved_raw_refs: Vec<&mut RawSegmentFile> =
+        interleaved_raw_segments.iter_mut().collect();
     let partitioned_raw_queries = partitioned_raw_queries();
     let mut partitioned_raw_segments_seen = 0usize;
     let mut partitioned_raw_segments_scored = 0usize;
     let mut partitioned_raw_segments_pruned = 0usize;
+    let mut interleaved_raw_segments_seen = 0usize;
+    let mut interleaved_raw_segments_scored = 0usize;
+    let mut interleaved_raw_segments_pruned = 0usize;
 
     for (i, q) in fixture.queries.iter().take(n_check).enumerate() {
         let (wand, stats) = fixture.index.search_with_stats(q, k);
@@ -511,6 +552,16 @@ fn print_diagnostics(c: &mut Criterion) {
         partitioned_raw_segments_seen += result.stats.segments_seen;
         partitioned_raw_segments_scored += result.stats.segments_scored;
         partitioned_raw_segments_pruned += result.stats.segments_pruned;
+
+        let result = top_k_weighted_u32_files_with_stats(&mut interleaved_raw_refs, query, k)
+            .expect("interleaved raw diagnostic search should succeed");
+        assert!(
+            !result.hits.is_empty(),
+            "interleaved raw diagnostic should return hits"
+        );
+        interleaved_raw_segments_seen += result.stats.segments_seen;
+        interleaved_raw_segments_scored += result.stats.segments_scored;
+        interleaved_raw_segments_pruned += result.stats.segments_pruned;
     }
 
     let n = n_check as u64;
@@ -531,9 +582,20 @@ fn print_diagnostics(c: &mut Criterion) {
         partitioned_raw_segments_scored as f64 / partitioned_raw_queries.len() as f64;
     let avg_partitioned_raw_pruned =
         partitioned_raw_segments_pruned as f64 / partitioned_raw_queries.len() as f64;
+    let avg_interleaved_raw_seen =
+        interleaved_raw_segments_seen as f64 / partitioned_raw_queries.len() as f64;
+    let avg_interleaved_raw_scored =
+        interleaved_raw_segments_scored as f64 / partitioned_raw_queries.len() as f64;
+    let avg_interleaved_raw_pruned =
+        interleaved_raw_segments_pruned as f64 / partitioned_raw_queries.len() as f64;
     assert!(
         avg_partitioned_raw_pruned > 0.0,
         "partitioned raw diagnostic should exercise segment pruning"
+    );
+    assert!(
+        avg_partitioned_raw_pruned > avg_interleaved_raw_pruned,
+        "vocab-local raw segments should prune more than interleaved segments: \
+         partitioned={avg_partitioned_raw_pruned}, interleaved={avg_interleaved_raw_pruned}"
     );
     // WAND efficiency: fraction of the 10K collection actually scored
     let scored_frac = 100.0 * avg_scored as f64 / N_DOCS as f64;
@@ -569,6 +631,9 @@ fn print_diagnostics(c: &mut Criterion) {
     );
     eprintln!(
         "  partitioned raw files searched/pruned segments: {avg_partitioned_raw_scored:.1}/{avg_partitioned_raw_pruned:.1} of {avg_partitioned_raw_seen:.1}"
+    );
+    eprintln!(
+        "  interleaved partitioned raw files searched/pruned segments: {avg_interleaved_raw_scored:.1}/{avg_interleaved_raw_pruned:.1} of {avg_interleaved_raw_seen:.1}"
     );
 
     // Dummy bench so criterion doesn't complain about an unused group

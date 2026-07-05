@@ -108,8 +108,8 @@ top hit: Some((37, 320.0))
 
 The search benchmark's `diagnostics_noop` target checks WAND and raw-impact
 top-k parity against brute force, then prints pruning counters for random raw
-files, vocab-local partitioned files, and an interleaved control over the same
-synthetic documents.
+files, vocab-local partitioned files, an interleaved control over the same
+synthetic documents, doc-order-local files, and impact-ordered files.
 
 ```sh
 cargo bench --bench search -- diagnostics_noop --warm-up-time 0.1 --measurement-time 0.1 --sample-size 10
@@ -121,6 +121,8 @@ Current layout counters from that diagnostic:
 raw files searched/pruned segments: 4.0/0.0 of 4.0
 partitioned raw files searched/pruned segments: 1.0/3.0 of 4.0
 interleaved partitioned raw files searched/pruned segments: 4.0/0.0 of 4.0
+doc-order-local raw files searched/pruned segments: 1.0/3.0 of 4.0
+impact-ordered raw files searched/pruned segments: 1.0/3.0 of 4.0
 ```
 
 ## WAND Diagnostics

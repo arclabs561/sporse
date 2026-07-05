@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-07-05
+
 ### Fixed
 
 - Store sidecar envelopes now include the `segstore` segment id, so a copied or

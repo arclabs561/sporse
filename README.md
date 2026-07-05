@@ -89,6 +89,8 @@ cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [
   segment sidecars. `RawImpactQuantizer` carries the scale callers persist with
   a raw impact generation, and `SparseVec::to_raw_impact_document` /
   `SparseVec::to_raw_impact_query` remain available for direct conversion.
+  `RawImpactQuantizer::score_error_bound` gives the per-query score bound from
+  document-weight rounding, which is useful when choosing or evaluating a scale.
   Callers write those pairs to `postings::raw` without `sporse` owning the file
   lifecycle.
   `postings::raw` covers `u32` impact-score segments, while native `SparseVec`

@@ -112,6 +112,22 @@ impl RawImpactQuantizer {
     pub fn query(self, vector: &SparseVec) -> Result<Vec<(u64, f32)>, RawImpactError> {
         vector.to_raw_impact_query(self.scale)
     }
+
+    /// Bound raw-impact score error from document-weight rounding for a query.
+    ///
+    /// Document quantization rounds each stored weight to
+    /// `round(weight * scale)`. For non-negative query weights, each matching
+    /// dimension can therefore change a document score by at most
+    /// `query_weight * 0.5 / scale`. The returned value is a conservative
+    /// absolute per-document score bound for this quantizer and query.
+    pub fn score_error_bound(self, query: &SparseVec) -> Result<f32, RawImpactError> {
+        let mut bound = 0.0;
+        for &(dim, weight) in query.pairs() {
+            validate_raw_impact_weight(dim, weight)?;
+            bound += weight * 0.5 / self.scale;
+        }
+        Ok(bound)
+    }
 }
 
 // ── SparseVec ────────────────────────────────────────────────────────────────
@@ -669,6 +685,25 @@ mod tests {
         assert_eq!(
             RawImpactQuantizer::new(0.0).unwrap_err(),
             RawImpactError::InvalidScale { scale: 0.0 }
+        );
+    }
+
+    #[test]
+    fn raw_impact_quantizer_bounds_query_score_error() {
+        let quantizer = RawImpactQuantizer::new(100.0).unwrap();
+        let query = SparseVec::new(vec![(1, 1.70), (2, 0.80), (3, 0.40)]);
+
+        let bound = quantizer.score_error_bound(&query).unwrap();
+        assert!((bound - 0.0145).abs() < 1e-7);
+
+        assert_eq!(
+            quantizer
+                .score_error_bound(&SparseVec::new(vec![(1, -1.0)]))
+                .unwrap_err(),
+            RawImpactError::InvalidWeight {
+                dim: 1,
+                weight: -1.0,
+            }
         );
     }
 

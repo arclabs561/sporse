@@ -12,6 +12,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ### Added
 
+- Added `RawImpactQuantizer::score_error_bound` for bounding raw-impact score
+  error from document-weight quantization.
 - Added raw-impact build-policy diagnostics comparing vocab-local partitioned
   files against an interleaved control over the same synthetic documents, so
   segment-pruning wins are tied to layout policy rather than only corpus shape.

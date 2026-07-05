@@ -12,7 +12,7 @@ use postings::raw::{
     RawTermId,
 };
 use postings::PostingsIndex;
-use sporse::{SparseVec, SporseIndex};
+use sporse::{RawImpactQuantizer, SparseVec, SporseIndex};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -185,7 +185,10 @@ fn quantized_raw_impacts_preserve_exact_ranking_when_margin_exceeds_rounding_bou
 
     let exact = top_k_by_score(&docs, &query, docs.len(), |query, doc| query.dot(doc));
     let margin = exact[k - 1].1 - exact[k].1;
-    let error_bound = quantized_score_error_bound(&query, SCALE);
+    let error_bound = RawImpactQuantizer::new(SCALE)
+        .unwrap()
+        .score_error_bound(&query)
+        .unwrap();
     assert!(
         margin > 2.0 * error_bound,
         "fixture must pin a stable ranking: margin={margin}, bound={error_bound}"
@@ -337,14 +340,6 @@ fn quantized_dot(query: &SparseVec, doc: &SparseVec, scale: f32) -> f32 {
         }
     }
     sum
-}
-
-fn quantized_score_error_bound(query: &SparseVec, scale: f32) -> f32 {
-    query
-        .pairs()
-        .iter()
-        .map(|&(_, weight)| weight.abs() * 0.5 / scale)
-        .sum()
 }
 
 fn top_k_by_score(

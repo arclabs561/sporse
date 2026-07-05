@@ -23,7 +23,7 @@ All notable changes to this project are documented here. Format based on [Keep a
 - Added a `raw_impact_generation` example showing quantized sparse-vector
   ingestion into sealed raw files plus one live shard, with a persisted
   quantizer scale sidecar.
-- Added raw-impact visibility filtering coverage over `postings` 0.2.12, so
+- Added raw-impact visibility filtering coverage over `postings` 0.2.13, so
   tombstone or newer-version masks are applied before sealed-file local top-k
   truncation.
 

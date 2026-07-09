@@ -4,6 +4,13 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the optional `store` stack to `segstore` 0.5 and `durability` 0.7.1,
+  using `segstore::DefaultStore` for the source-vector segment model and
+  `segstore::SidecarEnvelope` for checked WAND sidecar framing.
+- Updated raw-impact dev coverage to `postings` 0.4.
+
 ## [0.6.8] - 2026-07-05
 
 ### Fixed

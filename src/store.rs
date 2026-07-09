@@ -25,43 +25,16 @@ use std::io::Read;
 use std::sync::{Arc, Mutex};
 
 use durability::{Directory, PersistenceResult};
-use segstore::{Reader as SegReader, SegmentCatalog, SegmentedStore, Store, View as SegView};
+use segstore::{
+    DefaultStore, Reader as SegReader, SegmentCatalog, SegmentedStore, SidecarEnvelope,
+    View as SegView,
+};
 
 use crate::{posting::BLOCK_SIZE, SparseVec, SporseIndex};
 
 /// The segstore payload model: items are sparse document vectors, a segment is a
 /// batch of source vectors (a `SporseIndex` is built + cached from them).
-struct SparseBacking;
-
-impl Store for SparseBacking {
-    type Id = u32;
-    type Item = SparseVec;
-    type Segment = Vec<(u32, SparseVec)>;
-
-    fn build_segment(&self, batch: &[(u32, SparseVec)]) -> Vec<(u32, SparseVec)> {
-        batch.to_vec()
-    }
-
-    fn merge_segments(
-        &self,
-        segs: &[&Vec<(u32, SparseVec)>],
-        live: &dyn Fn(&u32) -> bool,
-    ) -> Vec<(u32, SparseVec)> {
-        segs.iter()
-            .flat_map(|s| s.iter())
-            .filter(|(id, _)| live(id))
-            .cloned()
-            .collect()
-    }
-
-    fn segment_len(&self, seg: &Vec<(u32, SparseVec)>) -> usize {
-        seg.len()
-    }
-
-    fn live_len(&self, seg: &Vec<(u32, SparseVec)>, live: &dyn Fn(&u32) -> bool) -> Option<usize> {
-        Some(seg.iter().filter(|(id, _)| live(id)).count())
-    }
-}
+type SparseBacking = DefaultStore<u32, SparseVec>;
 
 /// Per-segment indexes keyed by segstore's stable segment id. A sealed add
 /// creates one new segment id, so cached indexes for existing segments are
@@ -174,7 +147,7 @@ impl UpdatableIndex {
     /// are buffered before a new immutable segment is sealed.
     pub fn open(dir: Arc<dyn Directory>, flush_threshold: usize) -> PersistenceResult<Self> {
         Ok(Self {
-            inner: SegmentedStore::open(dir, SparseBacking, flush_threshold)?,
+            inner: SegmentedStore::open(dir, SparseBacking::new(), flush_threshold)?,
             sidecar_recipe: Self::make_sidecar_recipe(),
             cache: RefCell::new(Cache {
                 by_segment_id: HashMap::new(),
@@ -542,16 +515,14 @@ impl UpdatableIndex {
         seg_id: u64,
         index: &[u8],
     ) -> Option<Vec<u8>> {
-        let recipe = sidecar_recipe.as_bytes();
-        let recipe_len = u32::try_from(recipe.len()).ok()?;
-        let mut bytes = Vec::with_capacity(24 + recipe.len() + index.len());
-        bytes.extend_from_slice(SIDECAR_MAGIC);
-        bytes.extend_from_slice(&SIDECAR_VERSION.to_le_bytes());
-        bytes.extend_from_slice(&seg_id.to_le_bytes());
-        bytes.extend_from_slice(&recipe_len.to_le_bytes());
-        bytes.extend_from_slice(recipe);
-        bytes.extend_from_slice(index);
-        Some(bytes)
+        SidecarEnvelope::encode(
+            SIDECAR_MAGIC,
+            SIDECAR_VERSION,
+            seg_id,
+            sidecar_recipe.as_bytes(),
+            index,
+        )
+        .ok()
     }
 
     #[cfg(test)]
@@ -564,30 +535,14 @@ impl UpdatableIndex {
         seg_id: u64,
         bytes: &'a [u8],
     ) -> Option<&'a [u8]> {
-        if bytes.len() < 24 {
-            return None;
-        }
-        if &bytes[..8] != SIDECAR_MAGIC {
-            return None;
-        }
-        let version = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
-        if version != SIDECAR_VERSION {
-            return None;
-        }
-        let encoded_seg_id = u64::from_le_bytes(bytes[12..20].try_into().ok()?);
-        if encoded_seg_id != seg_id {
-            return None;
-        }
-        let recipe_len = u32::from_le_bytes(bytes[20..24].try_into().ok()?) as usize;
-        let recipe_start = 24usize;
-        let recipe_end = recipe_start.checked_add(recipe_len)?;
-        if bytes.len() < recipe_end {
-            return None;
-        }
-        if &bytes[recipe_start..recipe_end] != sidecar_recipe.as_bytes() {
-            return None;
-        }
-        Some(&bytes[recipe_end..])
+        SidecarEnvelope::decode(
+            SIDECAR_MAGIC,
+            SIDECAR_VERSION,
+            seg_id,
+            sidecar_recipe.as_bytes(),
+            bytes,
+        )
+        .ok()
     }
 
     fn reader_sidecar_name(seg_id: u64) -> String {

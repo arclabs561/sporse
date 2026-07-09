@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-09
+
 ### Changed
 
 - Updated the optional `store` stack to `segstore` 0.5 and `durability` 0.7.1,

@@ -4,11 +4,12 @@ Sparse vector index for learned sparse retrieval.
 
 Indexes sparse vectors using an inverted index, whether the dimensions are
 lexical (SPLADE-style vocabulary-term weights) or latent (the composite codes
-the `sae` module learns). Top-k inner product search uses Block-Max WAND, a
+the `sae` module learns). Top-k inner product search uses WAND with block-max
+score bounds (after Block-Max WAND, without its shallow cursor moves), a
 safe dynamic-pruning traversal: it skips
 documents that provably cannot enter the top-k, so the result is identical to an
-exhaustive scan over the same scores (the `wand_diagnostics` example verifies
-this parity).
+exhaustive scan over the same scores, with ties at the k-th score going to the
+lowest doc ids (the `wand_diagnostics` example verifies this parity).
 
 The `sae` module also *learns* sparse codes rather than only serving them: a
 Composite-Code Sparse Autoencoder (CCSA, arXiv:2204.07023) encodes dense vectors
@@ -120,7 +121,9 @@ search/prune 1.0/3.0, and an interleaved partitioned control searches/prunes
 - Broder, Carmel, Herscovici, Soffer, and Zien, "Efficient Query Evaluation
   using a Two-Level Retrieval Process" (CIKM 2003). The original WAND traversal.
 - Ding and Suel, "Faster Top-k Document Retrieval Using Block-Max Indexes"
-  (SIGIR 2011). The block-max refinement this crate implements.
+  (SIGIR 2011). The source of the block-max bounds this crate uses; the
+  traversal here skips per-document scoring with them but does not move
+  cursors shallowly the way BMW does.
 - Formal, Piwowarski, and Clinchant, "SPLADE: Sparse Lexical and Expansion Model
   for First Stage Ranking" (arXiv:2107.05720). The lexical learned sparse
   representations this index is built to serve.

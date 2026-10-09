@@ -4,6 +4,12 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+### Fixed
+
+- `SporseIndex::search` breaks ties at the k-th score toward the lowest doc
+  ids and orders tied results by id, matching an exhaustive scan. Before, a
+  later higher-scoring document could evict the lowest tied id.
+
 ## [0.7.0] - 2026-07-09
 
 ### Changed

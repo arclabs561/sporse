@@ -135,7 +135,12 @@ fn search_bmw_impl(
     initial_threshold: f32,
     fill_heap: bool,
 ) -> (Vec<(u32, f32)>, WandStats) {
-    let mut heap: BinaryHeap<Reverse<(OrdF32, u32)>> = BinaryHeap::with_capacity(k + 1);
+    // Min-heap on (score, Reverse(doc)): at a tied score the highest doc id is
+    // evicted first, so ties at the k-th score keep the lowest ids, the same
+    // set an exhaustive scan sorted by (score desc, id asc) returns. Docs
+    // arrive in increasing id order, so rejecting a later doc whose score only
+    // equals the threshold agrees with that rule.
+    let mut heap: BinaryHeap<Reverse<(OrdF32, Reverse<u32>)>> = BinaryHeap::with_capacity(k + 1);
     let mut threshold = initial_threshold.max(0.0);
     let mut stats = WandStats::default();
 
@@ -241,7 +246,7 @@ fn search_bmw_impl(
             }
 
             if score > threshold || (fill_heap && heap.len() < k) {
-                heap.push(Reverse((OrdF32(score), pivot_doc)));
+                heap.push(Reverse((OrdF32(score), Reverse(pivot_doc))));
                 if heap.len() > k {
                     heap.pop();
                 }
@@ -265,8 +270,8 @@ fn search_bmw_impl(
 
     let mut results: Vec<(u32, f32)> = heap
         .into_iter()
-        .map(|Reverse((OrdF32(score), doc_id))| (doc_id, score))
+        .map(|Reverse((OrdF32(score), Reverse(doc_id)))| (doc_id, score))
         .collect();
-    results.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+    results.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     (results, stats)
 }

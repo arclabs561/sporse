@@ -1,3 +1,4 @@
+#![doc = include_str!("../README.md")]
 //! Sparse vector index for learned sparse retrieval.
 //!
 //! Indexes sparse vectors using an inverted index with Block-Max WAND
@@ -850,6 +851,23 @@ mod tests {
     fn search_before_build_panics() {
         let index = SporseIndex::new();
         index.search(&SparseVec::new(vec![(0, 1.0)]), 1);
+    }
+
+    #[test]
+    fn search_matches_exhaustive_top_k_when_the_kth_score_ties() {
+        // Docs 0..=4 tie at 1.0 and doc 5 scores 2.0, so k = 5 must keep the
+        // four lowest tied ids, like the exhaustive scan (score desc, id asc).
+        let mut index = SporseIndex::new();
+        for doc in 0..5u32 {
+            index.insert(doc, &SparseVec::new(vec![(0, 1.0)]));
+        }
+        index.insert(5, &SparseVec::new(vec![(0, 2.0)]));
+        index.build();
+        let query = SparseVec::new(vec![(0, 1.0)]);
+        let expected = vec![(5, 2.0), (0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0)];
+        assert_eq!(index.search_exact_above(&query, 5, 0.0), expected);
+        assert_eq!(index.search(&query, 5), expected);
+        assert_eq!(index.search_with_stats(&query, 5).0, expected);
     }
 
     #[test]

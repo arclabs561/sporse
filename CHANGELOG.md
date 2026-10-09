@@ -4,8 +4,27 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-09
+
+### Changed
+
+- The optional `store` feature now requires `segstore` 0.6 and `durability`
+  0.8. This is a breaking change: `store::UpdatableIndex::open` and
+  `store::SnapshotIndex::open` take `Arc<dyn durability::Directory>`, so
+  callers must pass a directory from `durability` 0.8.
+- The published package contains only the sources, tests, examples, benches,
+  README, changelog, and license files.
+
 ### Fixed
 
+- Re-adding a document id after its earlier copy was sealed into a segment
+  now replaces that copy in every store search path. Before,
+  `store::UpdatableIndex::search`, reader views, and
+  `store::SnapshotIndex::search` could return the id twice, once with the old
+  vector's score.
+- Store searches order segment upper bounds with `f32::total_cmp`, so a NaN
+  query weight no longer gives the sort an inconsistent comparator, which
+  Rust 1.81 and later may panic on.
 - `SporseIndex::search` breaks ties at the k-th score toward the lowest doc
   ids and orders tied results by id, matching an exhaustive scan. Before, a
   later higher-scoring document could evict the lowest tied id.

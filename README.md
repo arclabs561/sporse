@@ -19,7 +19,7 @@ into C-hot composite codes for this same index (the `ccsa_retrieval` example).
 
 ```toml
 [dependencies]
-sporse = "0.7"
+sporse = "0.8"
 ```
 
 ## Usage

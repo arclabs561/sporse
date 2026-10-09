@@ -135,3 +135,20 @@ fn store_search_matches_brute_force_across_segments() {
     }
     check(&store, &live, &mut rng);
 }
+
+#[test]
+fn store_search_with_a_nan_query_weight_ranks_without_panicking() {
+    // Rust 1.81+ sorts may panic on an inconsistent comparator; segment
+    // ordering and result ranking must stay total when a query weight is NaN.
+    let mut store = UpdatableIndex::open(MemoryDirectory::arc(), 2).unwrap();
+    let mut rng = Lcg(7);
+    for id in 0u32..40 {
+        store.add(id, SparseVec::new(random_vec(&mut rng))).unwrap();
+    }
+    store.checkpoint().unwrap();
+    let query = SparseVec::new(vec![(0, f32::NAN), (1, 1.0), (2, 0.5)]);
+    let results = store.search(&query, 10);
+    assert!(results.len() <= 10);
+    assert!(results.iter().all(|(_, score)| score.is_finite()));
+    assert!(results.windows(2).all(|w| w[0].1 >= w[1].1));
+}

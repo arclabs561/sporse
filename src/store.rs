@@ -18,7 +18,6 @@
 //! or above its global rank within its own segment.
 
 use std::cell::RefCell;
-use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -306,7 +305,7 @@ impl UpdatableIndex {
                         .map(|idx| (*seg_id, idx.query_upper_bound(query)))
                 })
                 .collect();
-            order.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+            order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
             for (seg_id, upper_bound) in order {
                 if Self::is_finite_zero_bound(upper_bound)
                     || (cand.len() >= k && upper_bound <= threshold)
@@ -673,7 +672,7 @@ impl UpdatableView {
             indexes
         };
 
-        indexes.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+        indexes.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
         let mut cand = Vec::new();
         let mut threshold = 0.0f32;
         for (index, upper_bound) in indexes {
@@ -759,7 +758,7 @@ impl SnapshotIndex {
         };
 
         stats.sealed_segments = self.catalog.segment_count();
-        indexes.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+        indexes.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
 
         let mut cand = Vec::new();
         let mut threshold = 0.0f32;

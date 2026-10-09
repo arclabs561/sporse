@@ -8,7 +8,7 @@
 //! straight-through estimator; at inference the hard argmax is what the index
 //! sees). The codes drive an inverted index, one posting list per dimension;
 //! `CompositeCode::to_sparse_vec` adapts a code into the [`SparseVec`] the
-//! existing [`SporseIndex`](crate::SporseIndex) already serves.
+//! existing [`crate::SporseIndex`] already serves.
 //!
 //! This module covers the full pipeline: `train_ccsa` fits the encoder/decoder
 //! (reconstruction MSE + optional uniformity regularizer, Gumbel-Softmax

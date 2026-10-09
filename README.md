@@ -42,7 +42,7 @@ let results = index.search(&query, 2);
 
 ## Examples
 
-Runnable examples live in [`examples/`](examples/):
+Runnable examples live in [`examples/`](https://github.com/arclabs561/sporse/tree/main/examples):
 
 - `basic.rs` prints score contributions for a small impact-score collection.
 - `postings_bridge.rs` converts live weighted `postings` entries into
@@ -79,7 +79,7 @@ cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [
 - `cli` -- the `sporse` binary (build and query an index from files)
 - `store` -- `store::UpdatableIndex`: an updatable, durable index (incremental
   add/delete, write-ahead log, checkpoint, compaction, crash recovery) backed by
-  [`segstore`](https://crates.io/crates/segstore). Per-segment indexes are cached
+  [the `segstore` crate](https://crates.io/crates/segstore). Per-segment indexes are cached
   and persisted as sidecars, so restart loads finalized posting lists and
   block-max metadata instead of rebuilding unchanged segments. `reader()` returns
   cloneable checkpoint-visible snapshot views for concurrent searches, and

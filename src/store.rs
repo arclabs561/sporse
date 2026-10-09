@@ -125,8 +125,9 @@ pub struct UpdatableView {
 /// This is the restart/query path for larger stores whose built WAND blocks have
 /// already been persisted by [`UpdatableIndex::checkpoint`]. It opens the
 /// segstore manifest without decoding source segments, then over-fetches stale
-/// sidecars by their tombstoned-id count and applies catalog tombstones before
-/// results enter the global top-k merge. If a sidecar is missing, stale by
+/// sidecars by their count of ids that are no longer live in that segment
+/// (tombstoned or re-added later) and drops those ids before results enter the
+/// global top-k merge. If a sidecar is missing, stale by
 /// recipe, or not decodable, only that source segment is decoded to rebuild the
 /// sidecar.
 pub struct SnapshotIndex {
@@ -158,7 +159,9 @@ impl UpdatableIndex {
     /// Add (or re-add) a document by id.
     pub fn add(&mut self, id: u32, vec: SparseVec) -> PersistenceResult<()> {
         // A sealed add introduces a new segment id; existing segments keep theirs,
-        // so the cache reuses them and builds only the new one.
+        // so the cache reuses them and builds only the new one. A re-add
+        // supersedes the old sealed copy, which changes that segment's live set.
+        self.invalidate_live_segment_of(id);
         self.inner.add(id, vec)?;
         Ok(())
     }
@@ -173,31 +176,37 @@ impl UpdatableIndex {
         &mut self,
         docs: impl IntoIterator<Item = (u32, SparseVec)>,
     ) -> PersistenceResult<()> {
+        let docs: Vec<(u32, SparseVec)> = docs.into_iter().collect();
+        for (id, _) in &docs {
+            self.invalidate_live_segment_of(*id);
+        }
         self.inner.extend(docs)?;
         Ok(())
     }
 
     /// Tombstone a document.
     pub fn delete(&mut self, id: u32) -> PersistenceResult<()> {
+        // Look up the owning segment before the delete clears it.
+        self.invalidate_live_segment_of(id);
         self.inner.delete(id)?;
-        // A tombstone only changes the live-set of the segment that holds `id`, so
-        // invalidate just that segment's cached index -- not the whole cache --
-        // and remove its now-stale sidecar. The live-id guard would reject it
-        // anyway; deleting avoids a wasted load on the next query.
-        let mut cache = self.cache.borrow_mut();
-        let ids = self.inner.segment_ids();
-        for (seg_idx, seg) in self.inner.segments().iter().enumerate() {
-            if seg.iter().any(|(sid, _)| *sid == id) {
-                let seg_id = ids[seg_idx];
-                cache.by_segment_id.remove(&seg_id);
-                self.persisted.borrow_mut().remove(&seg_id);
-                let _ = self
-                    .inner
-                    .dir()
-                    .delete(&self.inner.index_name(seg_id, INDEX_KIND));
-            }
-        }
         Ok(())
+    }
+
+    /// A re-add or tombstone only changes the live set of the segment that
+    /// holds `id`'s live copy, so invalidate just that segment's cached index
+    /// -- not the whole cache -- and remove its now-stale sidecar. The live-id
+    /// guard would reject it anyway; deleting avoids a wasted load on the next
+    /// query.
+    fn invalidate_live_segment_of(&self, id: u32) {
+        let Some(seg_id) = self.inner.live_segment_of(&id) else {
+            return;
+        };
+        self.cache.borrow_mut().by_segment_id.remove(&seg_id);
+        self.persisted.borrow_mut().remove(&seg_id);
+        let _ = self
+            .inner
+            .dir()
+            .delete(&self.inner.index_name(seg_id, INDEX_KIND));
     }
 
     /// Merge segments (dropping tombstoned docs) and persist a checkpoint.
@@ -331,7 +340,8 @@ impl UpdatableIndex {
         // The unflushed buffer is bounded by the flush threshold; build it fresh.
         let buffered = self.inner.buffer();
         stats.buffered_docs = buffered.len();
-        if let Some(idx) = self.build_live_index(buffered) {
+        // segstore keeps at most one buffered copy per id and none tombstoned.
+        if let Some(idx) = Self::build_live_index_from(buffered, &|id| self.inner.is_live(id)) {
             let upper_bound = idx.query_upper_bound(query);
             if Self::is_finite_zero_bound(upper_bound) {
                 stats.pruned_buffer = true;
@@ -384,9 +394,10 @@ impl UpdatableIndex {
         }
     }
 
-    /// Build a `SporseIndex` over the live documents of `items` (None if empty).
-    fn build_live_index(&self, items: &[(u32, SparseVec)]) -> Option<SporseIndex> {
-        Self::build_live_index_from(items, &|id| self.inner.is_live(id))
+    /// Build a `SporseIndex` over the live copies in sealed segment `seg_id`
+    /// (None if empty). A copy superseded by a later re-add is not live.
+    fn build_live_index(&self, seg: &[(u32, SparseVec)], seg_id: u64) -> Option<SporseIndex> {
+        Self::build_live_index_from(seg, &|id| self.inner.is_live_in(seg_id, id))
     }
 
     fn build_live_index_from(
@@ -415,7 +426,7 @@ impl UpdatableIndex {
             self.persisted.borrow_mut().insert(seg_id);
             return Some(idx);
         }
-        let idx = self.build_live_index(seg)?;
+        let idx = self.build_live_index(seg, seg_id)?;
         self.persist_sidecar(&idx, seg, seg_id);
         Some(idx)
     }
@@ -429,7 +440,7 @@ impl UpdatableIndex {
             &name,
             &self.sidecar_recipe,
             seg,
-            &|id| self.inner.is_live(id),
+            &|id| self.inner.is_live_in(seg_id, id),
             seg_id,
         )
     }
@@ -466,7 +477,7 @@ impl UpdatableIndex {
     fn persist_sidecar(&self, idx: &SporseIndex, seg: &[(u32, SparseVec)], seg_id: u64) {
         let sidecar = SporseSidecar {
             index: idx.clone(),
-            ids: self.live_ids_vec(seg),
+            ids: self.live_ids_vec(seg, seg_id),
         };
         if let Ok(index) = postcard::to_allocvec(&sidecar) {
             let Some(bytes) = self.encode_sidecar(&index, seg_id) else {
@@ -483,8 +494,8 @@ impl UpdatableIndex {
         }
     }
 
-    fn live_ids_vec(&self, seg: &[(u32, SparseVec)]) -> Vec<u32> {
-        Self::live_ids_vec_from(seg, &|id| self.inner.is_live(id))
+    fn live_ids_vec(&self, seg: &[(u32, SparseVec)], seg_id: u64) -> Vec<u32> {
+        Self::live_ids_vec_from(seg, &|id| self.inner.is_live_in(seg_id, id))
     }
 
     fn live_ids_vec_from(seg: &[(u32, SparseVec)], live: &dyn Fn(&u32) -> bool) -> Vec<u32> {
@@ -566,7 +577,7 @@ impl UpdatableIndex {
                 self.persisted.borrow_mut().insert(seg_id);
                 continue;
             }
-            if let Some(idx) = self.build_live_index(&seg[..]) {
+            if let Some(idx) = self.build_live_index(&seg[..], seg_id) {
                 self.persist_sidecar(&idx, &seg[..], seg_id);
             }
         }
@@ -621,7 +632,8 @@ impl UpdatableView {
         let segs = self.inner.segments();
         let ids = self.inner.segment_ids();
         stats.sealed_segments = ids.len();
-        let live = |id: &u32| self.inner.is_live(id);
+        // Per copy: a segment's copy of a re-added id is not live.
+        let live_in = |seg_id: u64| move |id: &u32| self.inner.is_live_in(seg_id, id);
         let segment_keys: Vec<(ReaderCacheKey, usize)> = segs
             .iter()
             .enumerate()
@@ -629,7 +641,7 @@ impl UpdatableView {
                 (
                     ReaderCacheKey {
                         segment_id: ids[i],
-                        live_ids: UpdatableIndex::live_ids_vec_from(&seg[..], &live),
+                        live_ids: UpdatableIndex::live_ids_vec_from(&seg[..], &live_in(ids[i])),
                     },
                     i,
                 )
@@ -645,6 +657,7 @@ impl UpdatableView {
             for (key, i) in segment_keys {
                 let seg_id = ids[i];
                 let seg = &segs[i];
+                let live = live_in(seg_id);
                 let index_key = key.clone();
                 let index = cache.by_key.entry(key).or_insert_with(|| {
                     let name = UpdatableIndex::reader_sidecar_name(seg_id);
@@ -751,18 +764,18 @@ impl SnapshotIndex {
                     entry.insert(index);
                 }
                 if let Some(Some(index)) = cache.get(&seg_id) {
-                    indexes.push((index.clone(), index.index.query_upper_bound(query)));
+                    indexes.push((seg_id, index.clone(), index.index.query_upper_bound(query)));
                 }
             }
             indexes
         };
 
         stats.sealed_segments = self.catalog.segment_count();
-        indexes.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        indexes.sort_unstable_by(|a, b| b.2.total_cmp(&a.2));
 
         let mut cand = Vec::new();
         let mut threshold = 0.0f32;
-        for (index, upper_bound) in indexes {
+        for (seg_id, index, upper_bound) in indexes {
             if UpdatableIndex::is_finite_zero_bound(upper_bound)
                 || (cand.len() >= k && upper_bound <= threshold)
             {
@@ -778,7 +791,7 @@ impl SnapshotIndex {
             };
             let live_results: Vec<(u32, f32)> = results
                 .into_iter()
-                .filter(|(id, _)| self.catalog.is_live(id))
+                .filter(|(id, _)| self.catalog.is_live_in(seg_id, id))
                 .collect();
             threshold = UpdatableIndex::merge_top_k(&mut cand, live_results, k);
         }
@@ -792,7 +805,9 @@ impl SnapshotIndex {
             return Ok(Some(index));
         }
         let segment: Vec<(u32, SparseVec)> = self.catalog.read_segment(seg_id)?;
-        let index = UpdatableIndex::build_live_index_from(&segment, &|id| self.catalog.is_live(id));
+        let index = UpdatableIndex::build_live_index_from(&segment, &|id| {
+            self.catalog.is_live_in(seg_id, id)
+        });
         if let Some(index) = &index {
             self.persist_sidecar(index, &segment, seg_id);
         }
@@ -823,7 +838,7 @@ impl SnapshotIndex {
         let stale_tombstones = sidecar
             .ids
             .iter()
-            .filter(|id| !self.catalog.is_live(id))
+            .filter(|id| !self.catalog.is_live_in(seg_id, id))
             .count();
         Some(SnapshotSegmentIndex {
             index: Arc::new(sidecar.index),
@@ -834,7 +849,9 @@ impl SnapshotIndex {
     fn persist_sidecar(&self, index: &SporseIndex, segment: &[(u32, SparseVec)], seg_id: u64) {
         let sidecar = SporseSidecar {
             index: index.clone(),
-            ids: UpdatableIndex::live_ids_vec_from(segment, &|id| self.catalog.is_live(id)),
+            ids: UpdatableIndex::live_ids_vec_from(segment, &|id| {
+                self.catalog.is_live_in(seg_id, id)
+            }),
         };
         if let Ok(index_bytes) = postcard::to_allocvec(&sidecar) {
             let Some(bytes) = UpdatableIndex::encode_sidecar_for_recipe(
@@ -1460,6 +1477,54 @@ mod tests {
             top.contains(&1),
             "nearest live doc should remain searchable"
         );
+    }
+
+    #[test]
+    fn re_added_id_returns_only_its_new_vector() {
+        // Id 1's old copy scores 5.0 on the query; its re-added copy scores 0.5.
+        fn assert_new_copy_only(results: &[(u32, f32)], path: &str) {
+            let ones: Vec<f32> = results
+                .iter()
+                .filter(|(id, _)| *id == 1)
+                .map(|(_, score)| *score)
+                .collect();
+            assert_eq!(ones, vec![0.5], "{path}: id 1 once, with the new score");
+        }
+
+        let dir = MemoryDirectory::arc();
+        let q = sv(&[(0, 1.0)]);
+        let (name, stale_sidecar) = {
+            let mut store = UpdatableIndex::open(dir.clone(), 2).unwrap();
+            store.add(1, sv(&[(0, 5.0)])).unwrap();
+            store.add(2, sv(&[(0, 1.0)])).unwrap();
+            store.checkpoint().unwrap();
+            // Warm the cached index and sidecar of the segment holding the old copy.
+            assert_eq!(store.search(&q, 10)[0], (1, 5.0));
+            let name = store
+                .inner
+                .index_name(store.inner.segment_ids()[0], INDEX_KIND);
+            let stale_sidecar = read_file(store.inner.dir(), &name);
+
+            store.add(1, sv(&[(0, 0.5), (1, 3.0)])).unwrap();
+            assert_new_copy_only(&store.search(&q, 10), "writer, buffered re-add");
+
+            store.add(3, sv(&[(2, 1.0)])).unwrap();
+            store.checkpoint().unwrap();
+            assert_new_copy_only(&store.search(&q, 10), "writer, sealed re-add");
+            assert_new_copy_only(&store.reader().view().search(&q, 10), "reader view");
+            (name, stale_sidecar)
+        };
+
+        let store = UpdatableIndex::open(dir.clone(), 2).unwrap();
+        assert_new_copy_only(&store.search(&q, 10), "reopened writer");
+        assert_new_copy_only(&store.reader().search(&q, 10), "reopened reader");
+        // A sidecar still holding the old copy (a crash before the writer
+        // removed it) must be filtered per copy by the snapshot.
+        dir.atomic_write(&name, &stale_sidecar).unwrap();
+        let snapshot = SnapshotIndex::open(dir).unwrap();
+        assert_new_copy_only(&snapshot.search(&q, 10).unwrap(), "snapshot index");
+        // k = 1 exercises the over-fetch past the superseded copy's score.
+        assert_eq!(snapshot.search(&q, 1).unwrap(), vec![(2, 1.0)]);
     }
 
     #[test]

@@ -4,6 +4,19 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-12
+
+### Changed
+
+- The optional `store` feature now requires `segstore` 0.7 and `durability`
+  0.9. This is a breaking change: callers of `store::UpdatableIndex::open`
+  and `store::SnapshotIndex::open` must pass directories from `durability`
+  0.9, matching the store's `Arc<dyn durability::Directory>` type.
+- Store conformance tests use the same `segstore` 0.7 dependency as the
+  production adapter.
+- Document and check the `store` feature's Rust 1.83 requirement from its CRC
+  dependency. The default library retains Rust 1.80 support.
+
 ## [0.8.0] - 2026-10-09
 
 ### Changed

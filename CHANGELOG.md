@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-12
+
 ### Changed
 
 - The optional `store` feature now requires `segstore` 0.7 and `durability`

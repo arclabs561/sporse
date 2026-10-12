@@ -4,6 +4,16 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-12
+
+### Fixed
+
+- Require `segstore` 0.7.2 so `store::UpdatableReader` searches recovered legacy
+  checkpoints using only the latest checkpointed vector for each document id.
+  Previously, a duplicate id in separate legacy segments could expose an obsolete
+  vector until the writer checkpointed again. Uncheckpointed replacements remain
+  visible only to the writer.
+
 ## [0.9.0] - 2026-10-12
 
 ### Changed
@@ -311,6 +321,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 - Initial sparse vector index.
 
+[Unreleased]: https://github.com/arclabs561/sporse/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/arclabs561/sporse/compare/v0.9.0...v0.9.1
 [0.4.0]: https://github.com/arclabs561/sporse/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/arclabs561/sporse/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/arclabs561/sporse/compare/v0.1.0...v0.2.0

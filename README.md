@@ -19,8 +19,11 @@ into C-hot composite codes for this same index (the `ccsa_retrieval` example).
 
 ```toml
 [dependencies]
-sporse = "0.8"
+sporse = "0.9"
 ```
+
+The default library supports Rust 1.80. The optional `store` feature requires
+Rust 1.83 because its CRC dependency requires that compiler version.
 
 ## Usage
 

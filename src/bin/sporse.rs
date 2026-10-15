@@ -59,7 +59,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Build { docs, out } => {
             let file = BufReader::new(fs::File::open(&docs)?);
             let mut index = SporseIndex::new();
-            let mut n = 0usize;
             for line in file.lines() {
                 let line = line?;
                 if line.trim().is_empty() {
@@ -67,11 +66,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let doc: DocLine = serde_json::from_str(&line)?;
                 index.insert(doc.id, &SparseVec::new(doc.vec));
-                n += 1;
             }
             index.build();
             fs::write(&out, serde_json::to_string(&index)?)?;
-            eprintln!("indexed {n} documents -> {out}");
+            eprintln!("indexed {} documents -> {out}", index.len());
         }
         Cmd::Search { index, query, k } => {
             let idx: SporseIndex = serde_json::from_str(&fs::read_to_string(&index)?)?;

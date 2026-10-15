@@ -34,8 +34,13 @@ impl CompositeCodeConfig {
     }
 
     /// Total dimensionality `D = C * L`.
+    ///
+    /// # Panics
+    /// Panics if the dimensionality overflows `usize`.
     pub fn dim(&self) -> usize {
-        self.chunks * self.chunk_size
+        self.chunks
+            .checked_mul(self.chunk_size)
+            .expect("composite code dimensionality overflow")
     }
 }
 
@@ -49,9 +54,15 @@ pub struct CompositeCode {
 impl CompositeCode {
     /// Encode per-dimension encoder logits (length `D = C * L`) into a composite
     /// code by taking the argmax within each chunk. Returns `None` if `logits`
-    /// has the wrong length or any chunk is empty.
+    /// has the wrong length or nonfinite values, either geometry dimension is
+    /// zero, the dimensionality overflows, or its indices cannot fit in `u32`.
     pub fn from_logits(logits: &[f32], config: CompositeCodeConfig) -> Option<Self> {
-        if config.chunk_size == 0 || logits.len() != config.dim() {
+        let dim = config.chunks.checked_mul(config.chunk_size)?;
+        if dim == 0
+            || u32::try_from(dim - 1).is_err()
+            || logits.len() != dim
+            || logits.iter().any(|x| !x.is_finite())
+        {
             return None;
         }
         let l = config.chunk_size;
@@ -180,7 +191,7 @@ pub struct CcsaModel {
 
 impl CcsaModel {
     /// Encode a dense input into a composite code with the trained encoder.
-    /// Returns `None` if `x` has the wrong length.
+    /// Returns `None` if `x` has the wrong length or produces nonfinite logits.
     pub fn encode(&self, x: &[f32]) -> Option<CompositeCode> {
         if x.len() != self.input_dim {
             return None;
@@ -194,6 +205,9 @@ impl CcsaModel {
 
     /// Reconstruct a dense input through encode then decode (sum of the active
     /// decoder rows).
+    ///
+    /// # Panics
+    /// Panics if `x` has the wrong length or produces nonfinite encoder logits.
     pub fn reconstruct(&self, x: &[f32]) -> Vec<f32> {
         let m = self.input_dim;
         let l = self.config.chunk_size;
@@ -208,7 +222,10 @@ impl CcsaModel {
         out
     }
 
-    /// Mean squared reconstruction error over `data`.
+    /// Mean squared reconstruction error over `data`; zero for empty data.
+    ///
+    /// # Panics
+    /// Panics if any row has the wrong length or produces nonfinite encoder logits.
     pub fn reconstruction_mse(&self, data: &[Vec<f32>]) -> f32 {
         if data.is_empty() {
             return 0.0;
@@ -231,19 +248,59 @@ impl CcsaModel {
 /// See [`CcsaModel`] for the method and its documented simplifications. The loss
 /// is the mean squared reconstruction error; gradients flow through the decoder
 /// from the hard code and through the encoder via the straight-through softmax.
+///
+/// Empty data and zero epochs are supported; inputs may be negative.
+///
+/// # Panics
+/// Panics before allocation if geometry or `input_dim` is zero, dimension or
+/// matrix-size multiplication overflows, or code indices do not fit in `u32`.
+/// Also panics if temperature is not finite and positive with a finite reciprocal,
+/// learning rate or uniformity weight is not finite and nonnegative, or any
+/// training row is not finite and exactly `input_dim` elements long.
 // The inner loops index parallel arrays at an offset (`d * m + i`), which reads
 // clearer with explicit indices than zipped iterators.
 #[allow(clippy::needless_range_loop)]
 pub fn train_ccsa(data: &[Vec<f32>], cfg: &CcsaTrainConfig) -> CcsaModel {
+    assert!(
+        cfg.code.chunks > 0 && cfg.code.chunk_size > 0,
+        "code geometry must be positive"
+    );
+    assert!(cfg.input_dim > 0, "input_dim must be positive");
     let m = cfg.input_dim;
     let d_total = cfg.code.dim();
+    let weight_len = d_total
+        .checked_mul(m)
+        .expect("encoder matrix size overflow");
+    assert!(
+        u32::try_from(d_total - 1).is_ok(),
+        "code dimensions exceed u32 indices"
+    );
+    assert!(
+        cfg.temperature.is_finite() && cfg.temperature > 0.0 && cfg.temperature.recip().is_finite(),
+        "temperature must be finite and positive with a finite reciprocal"
+    );
+    assert!(
+        cfg.lr.is_finite() && cfg.lr >= 0.0,
+        "lr must be finite and nonnegative"
+    );
+    assert!(
+        cfg.uniformity_weight.is_finite() && cfg.uniformity_weight >= 0.0,
+        "uniformity_weight must be finite and nonnegative"
+    );
+    for row in data {
+        assert!(row.len() == m, "training row length must equal input_dim");
+        assert!(
+            row.iter().all(|x| x.is_finite()),
+            "training rows must be finite"
+        );
+    }
     let l = cfg.code.chunk_size;
     let c = cfg.code.chunks;
     let inv_tau = 1.0 / cfg.temperature;
 
     let mut rng = Lcg::new(cfg.seed);
-    let mut w_enc: Vec<f32> = (0..d_total * m).map(|_| rng.next_small()).collect();
-    let mut w_dec: Vec<f32> = (0..d_total * m).map(|_| rng.next_small()).collect();
+    let mut w_enc: Vec<f32> = (0..weight_len).map(|_| rng.next_small()).collect();
+    let mut w_dec: Vec<f32> = (0..weight_len).map(|_| rng.next_small()).collect();
 
     let n = data.len().max(1) as f32;
     let target_p = c as f32 / d_total as f32;
@@ -264,8 +321,8 @@ pub fn train_ccsa(data: &[Vec<f32>], cfg: &CcsaTrainConfig) -> CcsaModel {
             }
         }
 
-        let mut g_enc = vec![0.0f32; d_total * m];
-        let mut g_dec = vec![0.0f32; d_total * m];
+        let mut g_enc = vec![0.0f32; weight_len];
+        let mut g_dec = vec![0.0f32; weight_len];
 
         for x in data {
             // Forward: logits (optionally Gumbel-noised), per-chunk softmax
@@ -346,7 +403,7 @@ pub fn train_ccsa(data: &[Vec<f32>], cfg: &CcsaTrainConfig) -> CcsaModel {
             }
         }
 
-        for k in 0..d_total * m {
+        for k in 0..weight_len {
             w_enc[k] -= cfg.lr * g_enc[k] / n;
             w_dec[k] -= cfg.lr * g_dec[k] / n;
         }
@@ -367,8 +424,23 @@ pub fn train_ccsa(data: &[Vec<f32>], cfg: &CcsaTrainConfig) -> CcsaModel {
 /// This is the input-normalization role BatchNorm plays in the paper. A fixed
 /// standardization (rather than in-model BatchNorm with learnable affine)
 /// suffices here because the encoder's linear layer can absorb any affine.
+/// Empty data and zero-dimensional rows are supported.
+///
+/// # Panics
+/// Panics before modifying any row if a row is not exactly `input_dim` elements
+/// long or contains nonfinite values.
 #[allow(clippy::needless_range_loop)]
 pub fn standardize(data: &mut [Vec<f32>], input_dim: usize) -> (Vec<f32>, Vec<f32>) {
+    for row in data.iter() {
+        assert!(
+            row.len() == input_dim,
+            "standardize row length must equal input_dim"
+        );
+        assert!(
+            row.iter().all(|x| x.is_finite()),
+            "standardize rows must be finite"
+        );
+    }
     let n = data.len().max(1) as f32;
     let mut mean = vec![0.0f32; input_dim];
     for x in data.iter() {

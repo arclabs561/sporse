@@ -43,6 +43,19 @@ let results = index.search(&query, 2);
 // [(0, 3.5), (1, 1.0)] -- doc 0 scores highest
 ```
 
+Before `build`, inserting an existing document ID replaces its entire vector;
+the latest registration wins. `upsert` returns `InsertOutcome::Inserted` or
+`InsertOutcome::Replaced` (`was_replaced()` provides a boolean). The existing
+`insert` method keeps its unit return. Empty vectors still count as documents,
+and `len()` counts distinct IDs. Built indexes are immutable. Search returns
+finite, positive scores, preferring lower document IDs on ties.
+
+With `serde`, serialize only built indexes; unbuilt serialization or loading
+returns an error. The built-index wire layout is retained. Older saved indexes
+that contain repeated IDs need rebuilding from their source documents to adopt
+replacement semantics. Deserializing `SparseVec` normalizes its pairs just as
+`SparseVec::new` does.
+
 ## Examples
 
 Runnable examples live in [`examples/`](https://github.com/arclabs561/sporse/tree/main/examples):

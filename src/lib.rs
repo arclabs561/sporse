@@ -30,6 +30,8 @@
 mod posting;
 mod wand;
 
+pub use wand::WandStats;
+
 /// Composite-code sparse-autoencoder codes (CCSA) and their index integration.
 pub mod sae;
 
@@ -37,7 +39,10 @@ pub mod sae;
 #[cfg(feature = "store")]
 pub mod store;
 
-use std::{collections::HashMap, fmt};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
 /// Errors returned when converting sparse vectors to quantized raw impacts.
 #[non_exhaustive]
@@ -51,6 +56,8 @@ pub enum RawImpactError {
     RoundedToZero { dim: u32, weight: f32, scale: f32 },
     /// A scaled document impact cannot fit in `u32`.
     WeightOverflow { dim: u32, weight: f32, scale: f32 },
+    /// A positive rescaled query weight overflows or rounds to zero in `f32`.
+    QueryWeightOutOfRange { dim: u32, weight: f32, scale: f32 },
 }
 
 impl fmt::Display for RawImpactError {
@@ -77,6 +84,10 @@ impl fmt::Display for RawImpactError {
                     "raw impact weight for dim {dim} exceeds u32: weight={weight}, scale={scale}"
                 )
             }
+            Self::QueryWeightOutOfRange { dim, weight, scale } => write!(
+                f,
+                "raw query weight for dim {dim} is not representable: weight={weight}, scale={scale}"
+            ),
         }
     }
 }
@@ -121,13 +132,20 @@ impl RawImpactQuantizer {
     /// dimension can therefore change a document score by at most
     /// `query_weight * 0.5 / scale`. The returned value is a conservative
     /// absolute per-document score bound for this quantizer and query.
+    /// The bound is rounded upward and covers document-weight rounding;
+    /// floating-point query rescaling and score arithmetic are separate errors.
     pub fn score_error_bound(self, query: &SparseVec) -> Result<f32, RawImpactError> {
-        let mut bound = 0.0;
+        let mut bound = 0.0f64;
         for &(dim, weight) in query.pairs() {
             validate_raw_impact_weight(dim, weight)?;
-            bound += weight * 0.5 / self.scale;
+            bound += f64::from(weight) * 0.5 / f64::from(self.scale);
         }
-        Ok(bound)
+        let rounded = bound as f32;
+        Ok(if bound > 0.0 && rounded.is_finite() {
+            f32::from_bits(rounded.to_bits() + 1)
+        } else {
+            rounded
+        })
     }
 }
 
@@ -140,8 +158,22 @@ impl RawImpactQuantizer {
 /// negative or non-finite weights fall back to exact sparse accumulation.
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(from = "SparseVecWire"))]
 pub struct SparseVec {
     pairs: Vec<(u32, f32)>,
+}
+
+#[cfg(feature = "serde")]
+#[derive(serde::Deserialize)]
+struct SparseVecWire {
+    pairs: Vec<(u32, f32)>,
+}
+
+#[cfg(feature = "serde")]
+impl From<SparseVecWire> for SparseVec {
+    fn from(wire: SparseVecWire) -> Self {
+        Self::new(wire.pairs)
+    }
 }
 
 impl SparseVec {
@@ -167,6 +199,10 @@ impl SparseVec {
     }
 
     /// Create from pre-sorted, deduplicated pairs without validation.
+    ///
+    /// Dimensions must be strictly increasing and weights nonzero. Use
+    /// [`Self::new`] to normalize arbitrary pairs; violating these preconditions
+    /// can produce incorrect dot products and search results.
     pub fn from_sorted(pairs: Vec<(u32, f32)>) -> Self {
         Self { pairs }
     }
@@ -247,13 +283,19 @@ impl SparseVec {
     /// Pair this with documents from [`Self::to_raw_impact_document`] at the
     /// same scale. The approximate raw score is
     /// `round(doc_weight * scale) * query_weight / scale`.
+    /// Returns [`RawImpactError::QueryWeightOutOfRange`] if a positive rescaled
+    /// weight cannot be represented as a finite, positive `f32`.
     pub fn to_raw_impact_query(&self, scale: f32) -> Result<Vec<(u64, f32)>, RawImpactError> {
         validate_raw_impact_scale(scale)?;
         self.pairs
             .iter()
             .map(|&(dim, weight)| {
                 validate_raw_impact_weight(dim, weight)?;
-                Ok((dim as u64, weight / scale))
+                let rescaled = weight / scale;
+                if !rescaled.is_finite() || (weight > 0.0 && rescaled == 0.0) {
+                    return Err(RawImpactError::QueryWeightOutOfRange { dim, weight, scale });
+                }
+                Ok((dim as u64, rescaled))
             })
             .collect()
     }
@@ -283,6 +325,22 @@ impl From<Vec<(u32, f32)>> for SparseVec {
 
 // ── SporseIndex ──────────────────────────────────────────────────────────────
 
+/// Whether an insertion introduced a document ID or replaced its prior vector.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InsertOutcome {
+    /// This ID was absent, including when the inserted vector is empty.
+    Inserted,
+    /// This ID already existed, even if the replacement vector is identical.
+    Replaced,
+}
+
+impl InsertOutcome {
+    /// Whether the document ID existed before this insertion.
+    pub fn was_replaced(self) -> bool {
+        self == Self::Replaced
+    }
+}
+
 /// Inverted index for sparse vector retrieval using Block-Max WAND.
 ///
 /// Insert documents with [`insert`](SporseIndex::insert), call
@@ -291,6 +349,10 @@ impl From<Vec<(u32, f32)>> for SparseVec {
 ///
 /// With the `serde` feature, the entire index can be serialized after
 /// [`build`](SporseIndex::build) and deserialized without rebuilding.
+/// Unbuilt indexes return serde errors because their construction state is
+/// transient. Built indexes retain the existing serialized layout. Older saved
+/// indexes containing repeated IDs must be rebuilt from their source documents
+/// to obtain latest-vector-wins semantics; loading does not migrate them.
 #[derive(Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SporseIndex {
@@ -298,7 +360,35 @@ pub struct SporseIndex {
     num_docs: u32,
     #[cfg_attr(feature = "serde", serde(default = "default_wand_safe"))]
     wand_safe: bool,
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            serialize_with = "serialize_built",
+            deserialize_with = "deserialize_built"
+        )
+    )]
     built: bool,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    doc_ids: HashSet<u32>,
+}
+
+#[cfg(feature = "serde")]
+fn serialize_built<S: serde::Serializer>(built: &bool, serializer: S) -> Result<S::Ok, S::Error> {
+    if !built {
+        return Err(serde::ser::Error::custom(
+            "build the index before serialization",
+        ));
+    }
+    serde::Serialize::serialize(built, serializer)
+}
+
+#[cfg(feature = "serde")]
+fn deserialize_built<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    let built = <bool as serde::Deserialize>::deserialize(deserializer)?;
+    if !built {
+        return Err(serde::de::Error::custom("serialized indexes must be built"));
+    }
+    Ok(built)
 }
 
 #[cfg(feature = "serde")]
@@ -314,17 +404,43 @@ impl SporseIndex {
             num_docs: 0,
             wand_safe: true,
             built: false,
+            doc_ids: HashSet::new(),
         }
     }
 
-    /// Insert a document. Each non-zero dimension of `vec` adds an entry
-    /// to the corresponding posting list.
+    /// Insert or replace a document by ID. The latest vector replaces all
+    /// dimensions of the prior vector, including replacement with an empty one.
+    /// Use [`Self::upsert`] to learn whether the ID already existed.
     ///
     /// # Panics
     ///
     /// Panics if called after [`build`](SporseIndex::build).
     pub fn insert(&mut self, doc_id: u32, vec: &SparseVec) {
+        self.upsert(doc_id, vec);
+    }
+
+    /// Insert or replace a document, reporting whether its ID already existed.
+    ///
+    /// Replacing an identical or empty vector still returns
+    /// [`InsertOutcome::Replaced`]. This reports identity, not content equality.
+    /// New IDs take work proportional to the vector's size; replacing an ID
+    /// scans the current posting lists to remove its previous entries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called after [`Self::build`].
+    pub fn upsert(&mut self, doc_id: u32, vec: &SparseVec) -> InsertOutcome {
         assert!(!self.built, "cannot insert after build");
+        let outcome = if self.doc_ids.insert(doc_id) {
+            self.num_docs += 1;
+            InsertOutcome::Inserted
+        } else {
+            self.postings.retain(|_, list| {
+                list.remove_document(doc_id);
+                list.len() > 0
+            });
+            InsertOutcome::Replaced
+        };
         self.wand_safe &= vec.wand_safe();
         for &(dim, weight) in vec.pairs() {
             self.postings
@@ -332,7 +448,7 @@ impl SporseIndex {
                 .or_insert_with(posting::PostingList::new)
                 .push(doc_id, weight);
         }
-        self.num_docs += 1;
+        outcome
     }
 
     /// Finalize the index: sort posting lists and compute block-max metadata.
@@ -342,11 +458,13 @@ impl SporseIndex {
             list.finalize();
         }
         self.built = true;
+        self.doc_ids = HashSet::new();
     }
 
     /// Search for the top-k documents by inner product with `query`.
     ///
     /// Returns `(doc_id, score)` pairs in descending score order.
+    /// Only finite, positive scores are returned; ties prefer lower IDs.
     ///
     /// # Panics
     ///
@@ -413,11 +531,7 @@ impl SporseIndex {
     /// Returns `(results, stats)` where results are `(doc_id, score)` pairs
     /// in descending score order, and stats describe the WAND traversal.
     #[doc(hidden)]
-    pub fn search_with_stats(
-        &self,
-        query: &SparseVec,
-        k: usize,
-    ) -> (Vec<(u32, f32)>, wand::WandStats) {
+    pub fn search_with_stats(&self, query: &SparseVec, k: usize) -> (Vec<(u32, f32)>, WandStats) {
         assert!(self.built, "must call build() before search()");
         if k == 0 || query.is_empty() {
             return (Vec::new(), wand::WandStats::default());
@@ -477,7 +591,7 @@ impl SporseIndex {
         ranked
     }
 
-    /// Number of documents inserted.
+    /// Number of distinct document IDs, including documents with empty vectors.
     pub fn len(&self) -> u32 {
         self.num_docs
     }

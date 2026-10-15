@@ -4,6 +4,28 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- `SporseIndex::upsert` reports `InsertOutcome::Inserted` or `Replaced`, with
+  `was_replaced()` for callers that need a boolean. `WandStats` is now nameable
+  from the crate root.
+
+### Fixed
+
+- Repeated pre-build document IDs replace the entire old vector, count once,
+  and remove old-only dimensions. Existing `insert` retains its unit signature.
+- Sparse-vector deserialization sorts, folds duplicate dimensions and removes
+  zeros. Built-index serialization retains its layout; unsupported unbuilt
+  index serialization and deserialization now return errors.
+- Raw query conversion rejects overflow and positive underflow after rescaling.
+- Document-rounding error bounds retain subnormal query contributions and
+  round upward instead of silently returning zero after intermediate underflow.
+- WAND returns only finite, positive scores, matching exact fallback. Store
+  searches retain equal-score candidates across segments so lower IDs win ties.
+- SAE encoding rejects invalid geometry and nonfinite logits; training and
+  standardization validate configuration and row inputs at their boundaries.
+  Empty training and zero epochs remain supported.
+
 ## [0.9.1] - 2026-10-12
 
 ### Fixed

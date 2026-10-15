@@ -30,6 +30,10 @@ impl PostingList {
         self.entries.push(PostingEntry { doc_id, weight });
     }
 
+    pub fn remove_document(&mut self, doc_id: u32) {
+        self.entries.retain(|entry| entry.doc_id != doc_id);
+    }
+
     /// Sort entries by doc_id and compute block-max metadata.
     pub fn finalize(&mut self) {
         self.entries.sort_unstable_by_key(|e| e.doc_id);

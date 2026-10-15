@@ -317,7 +317,7 @@ impl UpdatableIndex {
             order.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
             for (seg_id, upper_bound) in order {
                 if Self::is_finite_zero_bound(upper_bound)
-                    || (cand.len() >= k && upper_bound <= threshold)
+                    || (cand.len() >= k && upper_bound < threshold)
                 {
                     stats.pruned_segments += 1;
                     continue;
@@ -329,7 +329,7 @@ impl UpdatableIndex {
                 {
                     stats.searched_segments += 1;
                     let results = if cand.len() >= k {
-                        idx.search_above(query, k, threshold)
+                        idx.search_above(query, k, Self::inclusive_cutoff(threshold))
                     } else {
                         idx.search(query, k)
                     };
@@ -345,10 +345,10 @@ impl UpdatableIndex {
             let upper_bound = idx.query_upper_bound(query);
             if Self::is_finite_zero_bound(upper_bound) {
                 stats.pruned_buffer = true;
-            } else if cand.len() < k || upper_bound > threshold {
+            } else if cand.len() < k || upper_bound >= threshold {
                 stats.searched_buffer = true;
                 let results = if cand.len() >= k {
-                    idx.search_above(query, k, threshold)
+                    idx.search_above(query, k, Self::inclusive_cutoff(threshold))
                 } else {
                     idx.search(query, k)
                 };
@@ -368,6 +368,17 @@ impl UpdatableIndex {
     /// equal-score ordering never depends on segment iteration order.
     fn sort_score_desc(cand: &mut [(u32, f32)]) {
         cand.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    }
+
+    // A segment's equal-score candidate can win globally by lower document ID.
+    // search_above stays strict; the previous nonnegative float includes equality
+    // without admitting zero, including when threshold is the least subnormal.
+    fn inclusive_cutoff(threshold: f32) -> f32 {
+        if threshold > 0.0 {
+            f32::from_bits(threshold.to_bits() - 1)
+        } else {
+            0.0
+        }
     }
 
     fn is_finite_zero_bound(upper_bound: f32) -> bool {
@@ -690,14 +701,14 @@ impl UpdatableView {
         let mut threshold = 0.0f32;
         for (index, upper_bound) in indexes {
             if UpdatableIndex::is_finite_zero_bound(upper_bound)
-                || (cand.len() >= k && upper_bound <= threshold)
+                || (cand.len() >= k && upper_bound < threshold)
             {
                 stats.pruned_segments += 1;
                 continue;
             }
             stats.searched_segments += 1;
             let results = if cand.len() >= k {
-                index.search_above(query, k, threshold)
+                index.search_above(query, k, UpdatableIndex::inclusive_cutoff(threshold))
             } else {
                 index.search(query, k)
             };
@@ -777,7 +788,7 @@ impl SnapshotIndex {
         let mut threshold = 0.0f32;
         for (seg_id, index, upper_bound) in indexes {
             if UpdatableIndex::is_finite_zero_bound(upper_bound)
-                || (cand.len() >= k && upper_bound <= threshold)
+                || (cand.len() >= k && upper_bound < threshold)
             {
                 stats.pruned_segments += 1;
                 continue;
@@ -785,7 +796,11 @@ impl SnapshotIndex {
             stats.searched_segments += 1;
             let segment_k = k.saturating_add(index.stale_tombstones);
             let results = if cand.len() >= k {
-                index.index.search_above(query, segment_k, threshold)
+                index.index.search_above(
+                    query,
+                    segment_k,
+                    UpdatableIndex::inclusive_cutoff(threshold),
+                )
             } else {
                 index.index.search(query, segment_k)
             };
@@ -883,6 +898,36 @@ mod tests {
     struct RecordingDirectory {
         inner: Arc<dyn Directory>,
         opened: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[test]
+    fn legacy_sidecar_is_accepted_by_shared_writer_reader_loader() {
+        let dir = MemoryDirectory::arc();
+        let name = "segstore.idx.0.wand";
+        dir.atomic_write(
+            name,
+            include_bytes!("../tests/fixtures/v0.9.1/checkpoint/segstore.idx.0.wand"),
+        )
+        .unwrap();
+        let segment = vec![
+            (10, sv(&[(0, 2.0), (3, 1.0)])),
+            (20, sv(&[(0, 0.5), (8, 4.0)])),
+        ];
+        let loaded = UpdatableIndex::load_sidecar_from(
+            &dir,
+            name,
+            &UpdatableIndex::make_sidecar_recipe(),
+            &segment,
+            &|_| true,
+            0,
+        )
+        .expect("the shared loader must accept the old artifact, not rebuild it");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.num_dimensions(), 3);
+        assert_eq!(
+            loaded.search(&sv(&[(0, 1.0), (3, 1.0)]), 10),
+            vec![(10, 3.0), (20, 0.5)]
+        );
     }
 
     impl RecordingDirectory {

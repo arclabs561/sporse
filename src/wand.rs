@@ -245,7 +245,10 @@ fn search_bmw_impl(
                 stats.docs_scored += 1;
             }
 
-            if score > threshold || (fill_heap && heap.len() < k) {
+            if score.is_finite()
+                && score > 0.0
+                && (score > threshold || (fill_heap && heap.len() < k))
+            {
                 heap.push(Reverse((OrdF32(score), Reverse(pivot_doc))));
                 if heap.len() > k {
                     heap.pop();

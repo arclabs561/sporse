@@ -12,6 +12,7 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ### Fixed
 
+- Sparse-vector deserialization preserves its struct name in named formats such as RON.
 - Repeated pre-build document IDs replace the entire old vector, count once,
   and remove old-only dimensions. Existing `insert` retains its unit signature.
 - Sparse-vector deserialization sorts, folds duplicate dimensions and removes

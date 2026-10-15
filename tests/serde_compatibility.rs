@@ -6,6 +6,33 @@ use sporse::{SparseVec, SporseIndex};
 fn query() -> SparseVec {
     SparseVec::new(vec![(0, 1.0), (3, 1.0)])
 }
+
+#[test]
+fn named_ron_preserves_legacy_struct_name_and_self_roundtrip() {
+    let legacy = include_str!("fixtures/v0.9.1/sparse-vector.ron");
+    let decoded: SparseVec = ron::from_str(legacy).unwrap();
+    assert_eq!(decoded.pairs(), &[(0, 2.0), (3, 1.0)]);
+    let named = ron::ser::to_string_pretty(
+        &decoded,
+        ron::ser::PrettyConfig::default().struct_names(true),
+    )
+    .unwrap();
+    assert!(named.starts_with("SparseVec("), "{named}");
+    let roundtrip: SparseVec = ron::from_str(&named).unwrap();
+    assert_eq!(roundtrip.pairs(), decoded.pairs());
+    let unnamed = ron::to_string(&decoded).unwrap();
+    let roundtrip: SparseVec = ron::from_str(&unnamed).unwrap();
+    assert_eq!(roundtrip.pairs(), decoded.pairs());
+}
+
+#[test]
+fn named_ron_normalizes_like_unnamed_input() {
+    for prefix in ["SparseVec", ""] {
+        let wire = format!("{prefix}(pairs:[(3,1.0),(0,2.0),(3,2.0),(1,0.0)])");
+        let decoded: SparseVec = ron::from_str(&wire).unwrap();
+        assert_eq!(decoded.pairs(), &[(0, 2.0), (3, 3.0)]);
+    }
+}
 fn assert_index(index: &SporseIndex) {
     assert_eq!(index.len(), 3);
     assert_eq!(index.num_dimensions(), 3);

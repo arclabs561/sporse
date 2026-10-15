@@ -165,6 +165,7 @@ pub struct SparseVec {
 
 #[cfg(feature = "serde")]
 #[derive(serde::Deserialize)]
+#[serde(rename = "SparseVec")]
 struct SparseVecWire {
     pairs: Vec<(u32, f32)>,
 }

@@ -47,7 +47,7 @@ serde_json = "1"
 ron = "0.12"
 tempfile = "3"
 vicinity = { version = "0.10", default-features = false, features = ["hnsw"] }
-rankops = "0.1.10"
+rankops = "0.2.0"
 
 [[bench]]
 name = "search"

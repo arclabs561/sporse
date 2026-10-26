@@ -51,10 +51,10 @@ and `len()` counts distinct IDs. Built indexes are immutable. Search returns
 finite, positive scores, preferring lower document IDs on ties.
 
 With `serde`, serialize only built indexes; unbuilt serialization or loading
-returns an error. The built-index wire layout is retained. Older saved indexes
-that contain repeated IDs need rebuilding from their source documents to adopt
-replacement semantics. Deserializing `SparseVec` normalizes its pairs just as
-`SparseVec::new` does.
+returns an error. Built indexes keep the same serialized layout as before.
+Older saved indexes that contain repeated IDs need rebuilding from their source
+documents to adopt replacement semantics. Deserializing `SparseVec` normalizes
+its pairs just as `SparseVec::new` does.
 
 ## Examples
 
@@ -114,9 +114,11 @@ cargo run --features cli --bin sporse -- search index.json --query '[[0, 1.0], [
   weights are `f32`. The current test suite covers recall sweeps across scales
   and query densities, but that path is not public storage API yet.
 
-For store restart measurement, `cargo run --release --features store --example store_reopen_diagnostics`
-prints first snapshot-query cost with persisted WAND sidecars present versus
-after deleting those sidecars and forcing source-segment rebuilds.
+To measure a store restart, `cargo run --release --features store --example store_reopen_diagnostics`
+reopens a checkpointed store and prints the duration of its first snapshot
+query. It does this twice: once with the persisted WAND sidecars present, and
+once after deleting those sidecars, which forces each segment to be rebuilt
+from its source vectors.
 
 For search-quality and pruning measurements, run:
 

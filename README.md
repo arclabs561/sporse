@@ -5,11 +5,10 @@ Sparse vector index for learned sparse retrieval.
 Indexes sparse vectors using an inverted index, whether the dimensions are
 lexical (SPLADE-style vocabulary-term weights) or latent (the composite codes
 the `sae` module learns). Top-k inner product search uses WAND with block-max
-score bounds (after Block-Max WAND, without its shallow cursor moves), a
-safe dynamic-pruning traversal: it skips
-documents that provably cannot enter the top-k, so the result is identical to an
-exhaustive scan over the same scores, with ties at the k-th score going to the
-lowest doc ids (the `wand_diagnostics` example verifies this parity).
+score bounds, but does not use Block-Max WAND’s shallow cursor moves. It skips
+documents that provably cannot enter the top-k. Results match an exhaustive
+scan over the same scores, with ties at the k-th score going to the lowest
+document IDs. The `wand_diagnostics` example verifies this parity.
 
 The `sae` module also *learns* sparse codes rather than only serving them: a
 Composite-Code Sparse Autoencoder (CCSA, arXiv:2204.07023) encodes dense vectors

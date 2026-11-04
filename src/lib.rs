@@ -554,7 +554,7 @@ impl SporseIndex {
         let mut cursors = Vec::new();
         for &(dim, query_weight) in query.pairs() {
             if let Some(list) = self.postings.get(&dim) {
-                cursors.push(wand::Cursor::new(list, query_weight));
+                cursors.push(wand::Cursor::new(list, dim, query_weight));
             }
         }
         cursors
@@ -983,6 +983,26 @@ mod tests {
         assert_eq!(index.search_exact_above(&query, 5, 0.0), expected);
         assert_eq!(index.search(&query, 5), expected);
         assert_eq!(index.search_with_stats(&query, 5).0, expected);
+    }
+
+    #[test]
+    fn wand_sums_a_doc_in_dimension_order_like_exhaustive_scoring() {
+        // Doc 1 scores 2^-24 + 2^-24 + 1 = 1 + 2^-23 in dimension order, but
+        // 1.0 if the 1.0 term is added first, which would tie doc 0 and lose
+        // on id. WAND must rank and score it as the exhaustive scan does.
+        let tiny = f32::powi(2.0, -24);
+        let doc0 = SparseVec::new(vec![(3, 1.0)]);
+        let doc1 = SparseVec::new(vec![(0, tiny), (1, tiny), (2, 1.0)]);
+        let mut index = SporseIndex::new();
+        index.insert(0, &doc0);
+        index.insert(1, &doc1);
+        index.build();
+        let query = SparseVec::new(vec![(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0)]);
+        let expected = vec![(1, doc1.dot(&query))];
+        assert_eq!(expected, vec![(1, 1.0 + 2.0 * tiny)]);
+        assert_eq!(index.search_exact_above(&query, 1, 0.0), expected);
+        assert_eq!(index.search(&query, 1), expected);
+        assert_eq!(index.search_with_stats(&query, 1).0, expected);
     }
 
     #[test]

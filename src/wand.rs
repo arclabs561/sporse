@@ -26,16 +26,20 @@ impl Ord for OrdF32 {
 pub(crate) struct Cursor<'a> {
     list: &'a PostingList,
     pos: usize,
+    /// Query dimension; orders cursors on the same doc so a score is summed in
+    /// ascending dimension order, like `SparseVec::dot` and the exact path.
+    dim: u32,
     pub query_weight: f32,
     /// query_weight * list.max_weight — cached for pivot selection.
     pub max_score: f32,
 }
 
 impl<'a> Cursor<'a> {
-    pub fn new(list: &'a PostingList, query_weight: f32) -> Self {
+    pub fn new(list: &'a PostingList, dim: u32, query_weight: f32) -> Self {
         Self {
             list,
             pos: 0,
+            dim,
             query_weight,
             max_score: list.max_weight * query_weight,
         }
@@ -168,8 +172,11 @@ fn search_bmw_impl(
             stats.iterations += 1;
         }
 
-        // Sort by current doc_id ascending for WAND pivot selection.
-        cursors.sort_unstable_by_key(|c| c.current_doc().unwrap_or(u32::MAX));
+        // Sort by current doc_id ascending for WAND pivot selection. Ties go to
+        // the lower dimension, so the scoring pass below adds a doc's terms in
+        // the same order as exhaustive scoring; f32 addition is not
+        // associative, and a different order can change a near-tie ranking.
+        cursors.sort_unstable_by_key(|c| (c.current_doc().unwrap_or(u32::MAX), c.dim));
 
         // Find pivot: accumulate GLOBAL per-term upper bounds left-to-right
         // until we exceed threshold. The global max_score is the only bound

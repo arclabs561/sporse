@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-04
+
 ### Added
 
 - `SporseIndex::upsert` reports `InsertOutcome::Inserted` or `Replaced`, with

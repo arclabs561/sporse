@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-19
+
 ### Fixed
 
 - Checkpoint snapshots keep documents visible when a writer searches after a

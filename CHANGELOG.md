@@ -4,6 +4,11 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+### Fixed
+
+- Checkpoint snapshots keep documents visible when a writer searches after a
+  later delete or replacement and rewrites the segment's WAND sidecar.
+
 ## [0.9.2] - 2026-11-04
 
 ### Added

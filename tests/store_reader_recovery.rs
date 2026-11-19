@@ -20,6 +20,20 @@ fn vector(dim: u32, weight: f32) -> SparseVec {
 }
 
 #[test]
+fn writer_search_after_delete_keeps_the_checkpoint_searchable() {
+    let dir = MemoryDirectory::arc();
+    let mut store = UpdatableIndex::open(dir.clone(), 2).unwrap();
+    let query = vector(1, 1.0);
+    store.add(7, vector(1, 10.0)).unwrap();
+    store.add(8, vector(1, 1.0)).unwrap();
+    store.checkpoint().unwrap();
+    store.delete(7).unwrap();
+    assert_eq!(store.search(&query, 2), [(8, 1.0)]);
+    let snapshot = sporse::store::SnapshotIndex::open(dir).unwrap();
+    assert_eq!(snapshot.search(&query, 2).unwrap(), [(7, 10.0), (8, 1.0)]);
+}
+
+#[test]
 fn recovered_reader_searches_checkpoint_owners_without_wal_leakage() {
     for legacy in [true, false] {
         for wal_replacement in [false, true] {
@@ -79,18 +93,4 @@ fn recovered_reader_searches_checkpoint_owners_without_wal_leakage() {
             assert!(held.search(&wal, 10).is_empty(), "held view is immutable");
         }
     }
-}
-
-#[test]
-fn writer_search_after_delete_keeps_the_checkpoint_searchable() {
-    let dir = MemoryDirectory::arc();
-    let mut store = UpdatableIndex::open(dir.clone(), 2).unwrap();
-    let query = vector(1, 1.0);
-    store.add(7, vector(1, 10.0)).unwrap();
-    store.add(8, vector(1, 1.0)).unwrap();
-    store.checkpoint().unwrap();
-    store.delete(7).unwrap();
-    assert_eq!(store.search(&query, 2), [(8, 1.0)]);
-    let snapshot = sporse::store::SnapshotIndex::open(dir).unwrap();
-    assert_eq!(snapshot.search(&query, 2).unwrap(), [(7, 10.0), (8, 1.0)]);
 }

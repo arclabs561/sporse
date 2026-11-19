@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-19
+
 ### Fixed
 
 - Checkpoint snapshots keep documents visible when a writer searches after a
@@ -354,7 +356,9 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 - Initial sparse vector index.
 
-[Unreleased]: https://github.com/arclabs561/sporse/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/arclabs561/sporse/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/arclabs561/sporse/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/arclabs561/sporse/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/arclabs561/sporse/compare/v0.9.0...v0.9.1
 [0.4.0]: https://github.com/arclabs561/sporse/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/arclabs561/sporse/compare/v0.2.0...v0.3.0

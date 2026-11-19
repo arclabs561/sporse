@@ -66,6 +66,22 @@ struct SporseSidecar {
     ids: Vec<u32>,
 }
 
+impl SporseSidecar {
+    /// Keep the legacy payload as a prefix so existing readers can still decode
+    /// it. The trailer lists every document id omitted from the index. A reader
+    /// with an older checkpoint can tell whether it needs the source vectors.
+    fn encode(
+        index: &SporseIndex,
+        segment: &[(u32, SparseVec)],
+        live: impl Fn(&u32) -> bool,
+    ) -> Option<Vec<u8>> {
+        let (mut indexed, omitted): (Vec<u32>, Vec<u32>) =
+            segment.iter().map(|(id, _)| *id).partition(live);
+        indexed.sort_unstable();
+        postcard::to_allocvec(&(index, indexed, omitted)).ok()
+    }
+}
+
 /// An updatable, durable learned-sparse index.
 pub struct UpdatableIndex {
     inner: SegmentedStore<SparseBacking>,
@@ -127,9 +143,9 @@ pub struct UpdatableView {
 /// segstore manifest without decoding source segments, then over-fetches stale
 /// sidecars by their count of ids that are no longer live in that segment
 /// (tombstoned or re-added later) and drops those ids before results enter the
-/// global top-k merge. If a sidecar is missing, stale by
-/// recipe, or not decodable, only that source segment is decoded to rebuild the
-/// sidecar.
+/// global top-k merge. If a sidecar is missing, has the wrong recipe, cannot
+/// be decoded, or omits a document visible at this checkpoint, the snapshot
+/// rebuilds it from that segment's source vectors.
 pub struct SnapshotIndex {
     catalog: SegmentCatalog<u32>,
     sidecar_recipe: String,
@@ -486,11 +502,8 @@ impl UpdatableIndex {
     /// Persist a built per-segment WAND index as its sidecar. Best-effort: a
     /// failed write leaves the in-memory index usable and simply rebuilds later.
     fn persist_sidecar(&self, idx: &SporseIndex, seg: &[(u32, SparseVec)], seg_id: u64) {
-        let sidecar = SporseSidecar {
-            index: idx.clone(),
-            ids: self.live_ids_vec(seg, seg_id),
-        };
-        if let Ok(index) = postcard::to_allocvec(&sidecar) {
+        if let Some(index) = SporseSidecar::encode(idx, seg, |id| self.inner.is_live_in(seg_id, id))
+        {
             let Some(bytes) = self.encode_sidecar(&index, seg_id) else {
                 return;
             };
@@ -503,10 +516,6 @@ impl UpdatableIndex {
                 self.persisted.borrow_mut().insert(seg_id);
             }
         }
-    }
-
-    fn live_ids_vec(&self, seg: &[(u32, SparseVec)], seg_id: u64) -> Vec<u32> {
-        Self::live_ids_vec_from(seg, &|id| self.inner.is_live_in(seg_id, id))
     }
 
     fn live_ids_vec_from(seg: &[(u32, SparseVec)], live: &dyn Fn(&u32) -> bool) -> Vec<u32> {
@@ -846,9 +855,26 @@ impl SnapshotIndex {
             .ok()?;
         let index_bytes =
             UpdatableIndex::decode_sidecar_for_recipe(&self.sidecar_recipe, seg_id, &bytes)?;
-        let sidecar: SporseSidecar = postcard::from_bytes(index_bytes).ok()?;
+        let (sidecar, trailer) = postcard::take_from_bytes::<SporseSidecar>(index_bytes).ok()?;
         if !sidecar.index.built {
             return None;
+        }
+        if trailer.is_empty() {
+            // Legacy sidecars list only indexed ids. A writer may have already
+            // removed a document that this catalog can still see. After reading
+            // the sidecar, check for unpublished changes, then for WAL rotation.
+            let dir = self.catalog.dir();
+            let epoch = self.catalog.epoch();
+            if dir.exists(&format!("segstore.wal.{epoch}"))
+                || SegmentCatalog::<u32>::open(dir.clone()).ok()?.epoch() != epoch
+            {
+                return None;
+            }
+        } else {
+            let (omitted, rest) = postcard::take_from_bytes::<Vec<u32>>(trailer).ok()?;
+            if !rest.is_empty() || omitted.iter().any(|id| self.catalog.is_live_in(seg_id, id)) {
+                return None;
+            }
         }
         let stale_tombstones = sidecar
             .ids
@@ -862,13 +888,9 @@ impl SnapshotIndex {
     }
 
     fn persist_sidecar(&self, index: &SporseIndex, segment: &[(u32, SparseVec)], seg_id: u64) {
-        let sidecar = SporseSidecar {
-            index: index.clone(),
-            ids: UpdatableIndex::live_ids_vec_from(segment, &|id| {
-                self.catalog.is_live_in(seg_id, id)
-            }),
-        };
-        if let Ok(index_bytes) = postcard::to_allocvec(&sidecar) {
+        if let Some(index_bytes) =
+            SporseSidecar::encode(index, segment, |id| self.catalog.is_live_in(seg_id, id))
+        {
             let Some(bytes) = UpdatableIndex::encode_sidecar_for_recipe(
                 &self.sidecar_recipe,
                 seg_id,
@@ -1654,6 +1676,36 @@ mod tests {
             !opened.iter().any(|path| path.starts_with("segstore.seg.")),
             "valid sidecars should avoid source segment payload reads: {opened:?}"
         );
+    }
+
+    #[test]
+    fn legacy_sidecar_after_delete_cannot_hide_a_checkpointed_document() {
+        for rotate_wal in [false, true] {
+            let dir = MemoryDirectory::arc();
+            let mut store = UpdatableIndex::open(dir.clone(), 2).unwrap();
+            let query = sv(&[(1, 1.0)]);
+            store.add(7, sv(&[(1, 10.0)])).unwrap();
+            store.add(8, sv(&[(1, 1.0)])).unwrap();
+            store.checkpoint().unwrap();
+            let snapshot = SnapshotIndex::open(dir.clone()).unwrap();
+            store.delete(7).unwrap();
+            assert_eq!(store.search(&query, 2), [(8, 1.0)]);
+            if rotate_wal {
+                store.checkpoint().unwrap();
+            }
+
+            // Write the exact pre-trailer representation of this newer live set.
+            let segment_id = store.inner.segment_ids()[0];
+            let name = store.inner.index_name(segment_id, INDEX_KIND);
+            let bytes = read_file(&dir, &name);
+            let sidecar: SporseSidecar =
+                postcard::from_bytes(store.decode_sidecar(&bytes, segment_id).unwrap()).unwrap();
+            let legacy = postcard::to_allocvec(&sidecar).unwrap();
+            dir.atomic_write(&name, &store.encode_sidecar(&legacy, segment_id).unwrap())
+                .unwrap();
+
+            assert_eq!(snapshot.search(&query, 2).unwrap(), [(7, 10.0), (8, 1.0)]);
+        }
     }
 
     #[test]

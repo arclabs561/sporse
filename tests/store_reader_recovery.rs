@@ -80,31 +80,3 @@ fn recovered_reader_searches_checkpoint_owners_without_wal_leakage() {
         }
     }
 }
-
-#[test]
-fn deleted_legacy_checkpoint_returns_only_the_replacement_after_reopen() {
-    // sporse 0.7.1 with segstore 0.5.0 and a two-document flush threshold:
-    // two segments contained ID 7 with weights 10 and 20; its last op was delete.
-    let root = tempfile::tempdir().unwrap();
-    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/v0.7.1/deleted-checkpoint");
-    for entry in std::fs::read_dir(fixture).unwrap() {
-        let entry = entry.unwrap();
-        std::fs::copy(entry.path(), root.path().join(entry.file_name())).unwrap();
-    }
-    let dir = durability::FsDirectory::arc(root.path()).unwrap();
-    let query = vector(1, 1.0);
-    let mut index = UpdatableIndex::open(dir.clone(), 2).unwrap();
-    let held = index.reader().view();
-    assert!(index.search(&query, 10).is_empty());
-    index.add(7, vector(1, 1.0)).unwrap();
-    assert_eq!(index.search(&query, 10), [(7, 1.0)]);
-    drop(index);
-
-    let mut index = UpdatableIndex::open(dir.clone(), 2).unwrap();
-    assert_eq!(index.search(&query, 10), [(7, 1.0)], "WAL replay");
-    index.checkpoint().unwrap();
-    let snapshot = sporse::store::SnapshotIndex::open(dir).unwrap();
-    assert_eq!(snapshot.search(&query, 10).unwrap(), [(7, 1.0)]);
-    assert!(held.search(&query, 10).is_empty());
-}

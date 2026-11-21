@@ -67,3 +67,8 @@ required-features = ["serde"]
 [[example]]
 name = "store_reopen_diagnostics"
 required-features = ["store"]
+
+[[example]]
+name = "recover_checkpoint"
+required-features = ["store"]
+test = true

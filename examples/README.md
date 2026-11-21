@@ -11,6 +11,7 @@ feature ids, weights are non-negative retrieval scores.
 | Convert live weighted postings into sparse vectors | `postings_bridge` | `cargo run --release --example postings_bridge` |
 | Write sparse vectors as raw impact files | `raw_impact_file` | `cargo run --release --example raw_impact_file` |
 | Stream sparse vectors into raw impact generations | `raw_impact_generation` | `cargo run --release --example raw_impact_generation` |
+| Replace a deleted document from an old checkpoint and verify WAL replay | `recover_checkpoint` | `cargo run --features store --example recover_checkpoint` |
 | Measure store snapshot sidecars | `store_reopen_diagnostics` | `cargo run --release --features store --example store_reopen_diagnostics` |
 | Check Block-Max WAND against brute force | `wand_diagnostics` | `cargo run --release --example wand_diagnostics` |
 | Combine sparse and dense retrieval | `hybrid_retrieval` | `cargo run --release --example hybrid_retrieval` |
@@ -103,6 +104,36 @@ with sidecars searched/pruned segments: 1/4
 after rebuild searched/pruned segments: 1/4
 top hit: Some((37, 320.0))
 ```
+
+## Recover a checkpoint written by an older version
+
+A document was deleted, then re-indexed with a new embedding. A stale copy can
+outrank the replacement even though a top-1 query still returns the expected ID.
+Look at both the score and the number of hits.
+
+```sh
+cargo run --features store --example recover_checkpoint
+```
+
+The example copies a checkpoint written by sporse 0.7.1 and segstore 0.5.0 to a
+temporary directory. Document 7 has two obsolete physical copies, with weights
+10 and 20 on dimension 1. Its last operation before the checkpoint was a
+delete. The replacement has weight 1. Querying dimension 1 with unit weight
+gives the following exact dot products:
+
+```text
+original checkpoint: []
+writer after replacement: [(7, 1.0)]
+writer after WAL replay: [(7, 1.0)]
+new checkpoint snapshot: [(7, 1.0)]
+reader held before replacement: []
+```
+
+With segstore 0.7.3 the writer initially reports the right answer. After WAL
+replay it returns document 7 at scores 20, 10, and 1. This example requests ten hits so the duplicate IDs are visible.
+Dropping and reopening the writer tests log replay. Opening a snapshot after
+checkpointing tests what a new reader sees. A previously acquired view keeps
+its original contents throughout.
 
 ## Search Bench Diagnostics
 

@@ -9,7 +9,7 @@
 //! exhaustive dot-product scan over the live documents returns, for any mix
 //! of adds, deletes, checkpoints, and mid-stream compaction.
 
-use durability::MemoryDirectory;
+use sporse::store::durability::MemoryDirectory;
 use sporse::store::UpdatableIndex;
 use sporse::SparseVec;
 use std::collections::BTreeMap;

@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use durability::{Directory, PersistenceResult};
 use segstore::conformance::{run_all, ConformanceStore};
+use sporse::store::durability::{Directory, PersistenceResult};
 use sporse::store::UpdatableIndex;
 use sporse::SparseVec;
 

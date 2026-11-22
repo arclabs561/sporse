@@ -89,11 +89,11 @@ fn fresh_store(
     warm: bool,
     checkpoint: bool,
 ) -> (
-    std::sync::Arc<dyn durability::Directory>,
+    std::sync::Arc<dyn sporse::store::durability::Directory>,
     sporse::store::UpdatableIndex,
     sporse::SparseVec,
 ) {
-    use durability::MemoryDirectory;
+    use sporse::store::durability::MemoryDirectory;
     let mut s = 0x1234_5678_9abc_def0u64;
     let dir = MemoryDirectory::arc();
     let mut store = sporse::store::UpdatableIndex::open(dir.clone(), FLUSH).unwrap();
@@ -112,7 +112,7 @@ fn fresh_store(
 
 #[cfg(feature = "store")]
 fn partitioned_store() -> (sporse::store::UpdatableIndex, sporse::SparseVec) {
-    use durability::MemoryDirectory;
+    use sporse::store::durability::MemoryDirectory;
     let mut s = 0x9e37_79b9_7f4a_7c15u64;
     let dir = MemoryDirectory::arc();
     let mut store = sporse::store::UpdatableIndex::open(dir, DIAG_DOCS_PER_SEGMENT).unwrap();
@@ -227,7 +227,7 @@ fn ingest_fs(c: &mut Criterion) {
     // The extend() win is invisible on MemoryDirectory (flush is free); on a real
     // filesystem the per-item WAL flush is the cost extend amortizes into one batch
     // sync. add-per-item vs extend over the same documents.
-    use durability::FsDirectory;
+    use sporse::store::durability::FsDirectory;
     let mut g = c.benchmark_group("ingest_fs");
     let n = 4_000usize;
     g.throughput(Throughput::Elements(n as u64));

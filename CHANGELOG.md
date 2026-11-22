@@ -10,6 +10,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 - Checkpoint snapshots keep documents visible when a writer searches after a
   later delete or replacement and rewrites the segment's WAND sidecar.
+- Reopening a legacy checkpoint after replacing a document no longer returns
+  the deleted copies of that document alongside its replacement.
 
 ## [0.9.2] - 2026-11-04
 

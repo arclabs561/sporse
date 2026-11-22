@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         fs::copy(entry.path(), copy.path().join(entry.file_name()))?;
     }
 
-    let dir = durability::FsDirectory::arc(copy.path())?;
+    let dir = sporse::store::durability::FsDirectory::arc(copy.path())?;
     let query = SparseVec::new(vec![(1, 1.0)]);
     let mut writer = UpdatableIndex::open(dir.clone(), 2)?;
     let before = writer.reader().view();

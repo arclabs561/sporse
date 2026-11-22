@@ -4,6 +4,14 @@ All notable changes to this project are documented here. Format based on [Keep a
 
 ## [Unreleased]
 
+### Breaking changes
+
+- With the `store` feature, directory handles and persistence errors now come
+  from segstore 0.9 and durability 0.10. Import a matching backend through
+  `sporse::store::durability`. Existing v1 write-ahead logs can be read and
+  appended. A newly written log uses v2, including after checkpoint rotation.
+  Keep a pre-upgrade copy for rollback to Sporse 0.9.
+
 ## [0.9.3] - 2026-11-19
 
 ### Fixed

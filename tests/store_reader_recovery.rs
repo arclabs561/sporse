@@ -1,9 +1,9 @@
 //! Public reader searches after recovering the original segstore manifest layout.
 #![cfg(feature = "store")]
 
-use durability::{checkpoint::CheckpointFile, MemoryDirectory};
 use segstore::{DefaultStore, SegmentedStore};
 use serde::Serialize;
+use sporse::store::durability::{checkpoint::CheckpointFile, MemoryDirectory};
 use sporse::{store::UpdatableIndex, SparseVec};
 
 // Original segstore manifest layout, before the superseded-copy extension.

@@ -100,7 +100,7 @@ fn postcard_preserves_legacy_and_replaced_built_indexes_only() {
 #[cfg(feature = "store")]
 mod sidecars {
     use super::*;
-    use durability::{Directory, MemoryDirectory, PersistenceResult};
+    use sporse::store::durability::{Directory, MemoryDirectory, PersistenceResult};
     use sporse::store::{SnapshotIndex, UpdatableIndex};
     use std::{
         io::{Read, Write},

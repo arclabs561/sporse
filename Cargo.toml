@@ -1,6 +1,6 @@
 [package]
 name = "sporse"
-version = "0.9.3"
+version = "0.10.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
@@ -22,7 +22,7 @@ serde = ["dep:serde"]
 cli = ["serde", "dep:clap", "dep:serde_json"]
 # `store` adds an updatable, durable index (`store::UpdatableIndex`) backed by
 # segstore: incremental add/delete + write-ahead log + checkpoint + compaction.
-store = ["serde", "dep:segstore", "dep:durability", "dep:postcard"]
+store = ["serde", "dep:segstore", "dep:postcard"]
 # Compatibility feature retained for crates that enabled the former optional
 # `innr` integration. The integration no longer needs an extra dependency.
 innr = []
@@ -31,8 +31,7 @@ innr = []
 serde = { version = "1", features = ["derive"], optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
-segstore = { version = "0.8.1", optional = true }
-durability = { version = "0.9", optional = true }
+segstore = { version = "0.9.0", git = "https://github.com/arclabs561/segstore", rev = "c2462bd0b8a2711197e5452c5508579bc82ce2e3", optional = true }
 # postcard 1.2 requires Rust 1.88. The store feature supports Rust 1.83.
 postcard = { version = ">=1.0, <1.2", optional = true, features = ["use-crc", "alloc", "use-std"] }
 
@@ -41,7 +40,7 @@ name = "sporse"
 required-features = ["cli"]
 
 [dev-dependencies]
-segstore = { version = "0.8.1", features = ["conformance"] }
+segstore = { version = "0.9.0", git = "https://github.com/arclabs561/segstore", rev = "c2462bd0b8a2711197e5452c5508579bc82ce2e3", features = ["conformance"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 postings = { version = "0.6", features = ["raw-segment"] }
 serde_json = "1"

@@ -23,7 +23,9 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
-use durability::{Directory, PersistenceResult};
+use self::durability::{Directory, PersistenceResult};
+/// The storage backends and errors accepted by this module.
+pub use segstore::durability;
 use segstore::{
     DefaultStore, Reader as SegReader, SegmentCatalog, SegmentedStore, SidecarEnvelope,
     View as SegView,
@@ -908,8 +910,8 @@ impl SnapshotIndex {
 
 #[cfg(test)]
 mod tests {
+    use super::durability::MemoryDirectory;
     use super::*;
-    use durability::MemoryDirectory;
     use std::io::Write;
     use std::path::PathBuf;
 

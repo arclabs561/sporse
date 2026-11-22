@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use durability::{Directory, FsDirectory};
+use sporse::store::durability::{Directory, FsDirectory};
 use sporse::{
     store::{SnapshotIndex, StoreSearchStats, UpdatableIndex},
     SparseVec,

@@ -43,7 +43,7 @@ fn underflow_zero_scores_are_excluded_in_both_paths() {
 #[cfg(feature = "store")]
 mod store {
     use super::*;
-    use durability::MemoryDirectory;
+    use sporse::store::durability::MemoryDirectory;
     use sporse::store::{SnapshotIndex, UpdatableIndex};
 
     fn assert_ties(surface: &str, weight: f32) {
